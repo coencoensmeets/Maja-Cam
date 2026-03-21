@@ -31,13 +31,13 @@ static ThermalPrinter_t *g_thermal_printer = NULL;
 static LEDRing_t *g_led_ring = NULL;
 static SettingsManager_t *g_settings = NULL;
 static LogManager_t *g_log_manager = NULL;
-OTAManager_t *g_ota_manager = NULL;  // Non-static so it can be accessed from remote_control.c
+OTAManager_t *g_ota_manager = NULL; // Non-static so it can be accessed from remote_control.c
 
 // Sub-menu state
-static bool g_sub_menu_selection = false; // false = OFF (red), true = ON (green)
-static int g_last_encoder_position = 0;   // Track last encoder position for relative changes
+static bool g_sub_menu_selection = false;       // false = OFF (red), true = ON (green)
+static int g_last_encoder_position = 0;         // Track last encoder position for relative changes
 static int g_sub_menu_position_accumulator = 0; // Accumulate encoder changes in sub-menu
-static int g_sub_menu_option = -1;        // Track which menu option opened the sub-menu (0=flash, 1=self-timer)
+static int g_sub_menu_option = -1;              // Track which menu option opened the sub-menu (0=flash, 1=self-timer)
 
 // WiFi provisioning pulse state
 static bool g_stop_provisioning_pulse = false;
@@ -52,8 +52,8 @@ static bool g_stop_poem_loading_animation = false;
 static TaskHandle_t g_poem_loading_animation_task = NULL;
 
 // Menu configuration
-#define CLICKS_PER_OPTION 2  // Changed from 4 to 2 for better response
-#define SUB_MENU_CLICKS_TO_TOGGLE 3  // Require 3 ticks in sub-menu to toggle
+#define CLICKS_PER_OPTION 2         // Changed from 4 to 2 for better response
+#define SUB_MENU_CLICKS_TO_TOGGLE 3 // Require 3 ticks in sub-menu to toggle
 
 // Forward declarations
 void stop_poem_loading_animation(void);
@@ -61,33 +61,35 @@ void stop_poem_loading_animation(void);
 // LED Animation functions
 static void led_ring_startup_animation(LEDRing_t *led_ring, bool *stop_flag)
 {
-    if (!led_ring) return;
-    
+    if (!led_ring)
+        return;
+
     int led_count = led_ring->num_leds;
-    
+
     // Calculate delay per LED for 2 revolutions per second
-    int delay_per_led = 500 / led_count;  // 500ms total per rotation / number of LEDs
-    
+    int delay_per_led = 500 / led_count; // 500ms total per rotation / number of LEDs
+
     // Keep running until stop flag is set
     while (!(*stop_flag))
     {
         for (int i = 0; i < led_count; i++)
         {
-            if (*stop_flag) break;
-            
+            if (*stop_flag)
+                break;
+
             // Clear all LEDs
             for (int j = 0; j < led_count; j++)
             {
                 led_ring->set_pixel(led_ring, j, 0, 0, 0);
             }
-            
+
             // Light current LED white
             led_ring->set_pixel(led_ring, i, 255, 255, 255);
             led_ring->refresh(led_ring);
             vTaskDelay(pdMS_TO_TICKS(delay_per_led));
         }
     }
-    
+
     // Clear all LEDs at end
     led_ring->clear(led_ring);
     led_ring->refresh(led_ring);
@@ -104,33 +106,35 @@ static void startup_animation_task(void *pvParameters)
 // Magenta pixel loading animation (for poem generation)
 static void led_ring_poem_loading_animation(LEDRing_t *led_ring, bool *stop_flag)
 {
-    if (!led_ring) return;
-    
+    if (!led_ring)
+        return;
+
     int led_count = led_ring->num_leds;
-    
+
     // Calculate delay per LED for 0.5 second per rotation
-    int delay_per_led = 500 / led_count;  // 500ms total / number of LEDs
-    
+    int delay_per_led = 500 / led_count; // 500ms total / number of LEDs
+
     // Keep running until stop flag is set
     while (!(*stop_flag))
     {
         for (int i = 0; i < led_count; i++)
         {
-            if (*stop_flag) break;
-            
+            if (*stop_flag)
+                break;
+
             // Clear all LEDs
             for (int j = 0; j < led_count; j++)
             {
                 led_ring->set_pixel(led_ring, j, 0, 0, 0);
             }
-            
+
             // Light current LED magenta (255, 0, 255)
             led_ring->set_pixel(led_ring, i, 255, 0, 255);
             led_ring->refresh(led_ring);
             vTaskDelay(pdMS_TO_TICKS(delay_per_led));
         }
     }
-    
+
     // Clear all LEDs at end
     led_ring->clear(led_ring);
     led_ring->refresh(led_ring);
@@ -146,10 +150,11 @@ static void poem_loading_animation_task(void *pvParameters)
 
 static void led_ring_wifi_connected_flash(LEDRing_t *led_ring)
 {
-    if (!led_ring) return;
-    
+    if (!led_ring)
+        return;
+
     int led_count = led_ring->num_leds;
-    
+
     // Smooth fade in green (1.5 seconds - increased from 510ms)
     for (int brightness = 0; brightness <= 255; brightness += 3)
     {
@@ -160,10 +165,10 @@ static void led_ring_wifi_connected_flash(LEDRing_t *led_ring)
         led_ring->refresh(led_ring);
         vTaskDelay(pdMS_TO_TICKS(18)); // 18ms * 85 steps = 1530ms fade in
     }
-    
+
     // Hold at full brightness longer (1 second - increased from 200ms)
     vTaskDelay(pdMS_TO_TICKS(1000));
-    
+
     // Smooth fade out (1.5 seconds - increased from 306ms)
     for (int brightness = 255; brightness >= 0; brightness -= 3)
     {
@@ -174,7 +179,7 @@ static void led_ring_wifi_connected_flash(LEDRing_t *led_ring)
         led_ring->refresh(led_ring);
         vTaskDelay(pdMS_TO_TICKS(18)); // 18ms * 85 steps = 1530ms fade out
     }
-    
+
     // Clear all LEDs
     led_ring->clear(led_ring);
     led_ring->refresh(led_ring);
@@ -182,17 +187,19 @@ static void led_ring_wifi_connected_flash(LEDRing_t *led_ring)
 
 static void led_ring_wifi_provisioning_pulse(LEDRing_t *led_ring, bool *stop_flag)
 {
-    if (!led_ring) return;
-    
+    if (!led_ring)
+        return;
+
     int led_count = led_ring->num_leds;
-    
+
     while (!(*stop_flag))
     {
         // Breathe in (2 seconds - increased from 1 second)
         for (int brightness = 0; brightness <= 255; brightness += 2)
         {
-            if (*stop_flag) break;
-            
+            if (*stop_flag)
+                break;
+
             for (int i = 0; i < led_count; i++)
             {
                 led_ring->set_pixel(led_ring, i, 0, 0, brightness);
@@ -200,12 +207,13 @@ static void led_ring_wifi_provisioning_pulse(LEDRing_t *led_ring, bool *stop_fla
             led_ring->refresh(led_ring);
             vTaskDelay(pdMS_TO_TICKS(16)); // 16ms * 128 steps = 2048ms (2 seconds)
         }
-        
+
         // Breathe out (2 seconds - increased from 1 second)
         for (int brightness = 255; brightness >= 0; brightness -= 2)
         {
-            if (*stop_flag) break;
-            
+            if (*stop_flag)
+                break;
+
             for (int i = 0; i < led_count; i++)
             {
                 led_ring->set_pixel(led_ring, i, 0, 0, brightness);
@@ -214,7 +222,7 @@ static void led_ring_wifi_provisioning_pulse(LEDRing_t *led_ring, bool *stop_fla
             vTaskDelay(pdMS_TO_TICKS(16)); // 16ms * 128 steps = 2048ms (2 seconds)
         }
     }
-    
+
     // Clear all LEDs when stopped
     led_ring->clear(led_ring);
     led_ring->refresh(led_ring);
@@ -236,12 +244,12 @@ void on_rotary_rotation(RotaryEncoder_t *encoder, int position)
     {
         // Accumulate encoder changes - require SUB_MENU_CLICKS_TO_TOGGLE ticks to toggle
         int position_delta = position - g_last_encoder_position;
-        
+
         if (position_delta != 0)
         {
             g_sub_menu_position_accumulator += position_delta;
             g_last_encoder_position = position;
-            
+
             // Check if we've accumulated enough ticks to toggle
             if (abs(g_sub_menu_position_accumulator) >= SUB_MENU_CLICKS_TO_TOGGLE)
             {
@@ -253,11 +261,11 @@ void on_rotary_rotation(RotaryEncoder_t *encoder, int position)
         }
         return;
     }
-    
+
     // Main menu rotation handling
     // Calculate menu option based on encoder position
     int new_option = ((position / CLICKS_PER_OPTION) % get_menu_options_count() + get_menu_options_count()) % get_menu_options_count();
-    
+
     // If this is the first rotation, fade in the menu
     if (!is_menu_visible())
     {
@@ -265,7 +273,7 @@ void on_rotary_rotation(RotaryEncoder_t *encoder, int position)
         main_menu_fade_in(new_option);
         return;
     }
-    
+
     // Only update if menu option changed
     if (new_option != get_current_menu_option())
     {
@@ -285,7 +293,7 @@ void on_button_long_press_progress(RotaryEncoder_t *encoder, int progress)
     if (g_led_ring)
     {
         // Set LED ring to red with increasing brightness as warning
-        g_led_ring->set_all(g_led_ring, 255, 0, 0); // Full red
+        g_led_ring->set_all(g_led_ring, 255, 0, 0);       // Full red
         g_led_ring->set_brightness(g_led_ring, progress); // 0-100 percent
         g_led_ring->refresh(g_led_ring);
     }
@@ -295,7 +303,7 @@ void on_button_long_press_progress(RotaryEncoder_t *encoder, int progress)
 void on_button_long_press(RotaryEncoder_t *encoder)
 {
     ESP_LOGI(TAG, "Factory reset initiated!");
-    
+
     // Reset all settings to defaults
     if (g_settings)
     {
@@ -303,11 +311,11 @@ void on_button_long_press(RotaryEncoder_t *encoder)
         g_settings->save_settings(g_settings);
         ESP_LOGI(TAG, "Settings reset to defaults");
     }
-    
+
     // Reset WiFi settings
     esp_wifi_restore();
     ESP_LOGI(TAG, "WiFi settings reset");
-    
+
     // Restart the device
     ESP_LOGI(TAG, "Restarting device...");
     esp_restart();
@@ -317,7 +325,7 @@ void on_button_long_press(RotaryEncoder_t *encoder)
 void on_button_press(RotaryEncoder_t *encoder)
 {
     ESP_LOGI(TAG, "Button pressed!");
-    
+
     // Check if we're in sub-menu mode
     if (is_sub_menu_active())
     {
@@ -346,31 +354,31 @@ void on_button_press(RotaryEncoder_t *encoder)
                 ESP_LOGI(TAG, "Auto-print setting saved: %s", g_sub_menu_selection ? "ENABLED" : "DISABLED");
             }
         }
-        
+
         // Exit sub-menu (fade out and return to main mode)
         main_menu_exit_sub_menu();
         g_sub_menu_option = -1; // Reset
         return;
     }
-    
+
     // Check if main menu is visible
     if (is_menu_visible())
     {
         int selected_option = get_current_menu_option();
         ESP_LOGI(TAG, "Menu option %d selected: %s", selected_option, get_menu_option_name(selected_option));
-        
+
         // Option 0 (Red - Flash Settings)
         if (selected_option == 0)
         {
             ESP_LOGI(TAG, "Opening Flash settings sub-menu...");
-            
+
             // Get current setting
             bool current_setting = true; // Default to enabled
             if (g_settings)
             {
                 current_setting = g_settings->settings.flash_enabled;
             }
-            
+
             // Enter sub-menu with current setting as initial selection
             g_sub_menu_selection = current_setting;
             g_sub_menu_option = 0; // Track that we're editing flash
@@ -379,40 +387,40 @@ void on_button_press(RotaryEncoder_t *encoder)
             main_menu_enter_sub_menu(current_setting);
             return;
         }
-        
+
         // Option 1 (Blue - Self Timer Settings)
         if (selected_option == 1)
         {
             ESP_LOGI(TAG, "Opening Self-Timer settings sub-menu...");
-            
+
             // Get current setting
             bool current_setting = false;
             if (g_settings)
             {
                 current_setting = g_settings->settings.self_timer_enabled;
             }
-            
+
             // Enter sub-menu with current setting as initial selection
             g_sub_menu_selection = current_setting;
-            g_sub_menu_option = 1; // Track that we're editing self-timer
+            g_sub_menu_option = 1;                                    // Track that we're editing self-timer
             g_last_encoder_position = encoder->get_position(encoder); // Save current position
-            g_sub_menu_position_accumulator = 0; // Reset accumulator for sub-menu
+            g_sub_menu_position_accumulator = 0;                      // Reset accumulator for sub-menu
             main_menu_enter_sub_menu(current_setting);
             return;
         }
-        
+
         // Option 2 (Green - Auto Print Settings)
         if (selected_option == 2)
         {
             ESP_LOGI(TAG, "Opening Auto Print settings sub-menu...");
-            
+
             // Get current setting
             bool current_setting = false;
             if (g_settings)
             {
                 current_setting = g_settings->settings.auto_print_enabled;
             }
-            
+
             // Enter sub-menu with current setting as initial selection
             g_sub_menu_selection = current_setting;
             g_sub_menu_option = 2; // Track that we're editing auto-print
@@ -421,12 +429,12 @@ void on_button_press(RotaryEncoder_t *encoder)
             main_menu_enter_sub_menu(current_setting);
             return;
         }
-        
+
         // Option 3 (Yellow - OTA Update)
         if (selected_option == 3)
         {
             ESP_LOGI(TAG, "Opening OTA Update menu...");
-            
+
             if (!g_ota_manager)
             {
                 ESP_LOGE(TAG, "OTA Manager not initialized!");
@@ -442,7 +450,7 @@ void on_button_press(RotaryEncoder_t *encoder)
                         }
                         g_led_ring->refresh(g_led_ring);
                         vTaskDelay(pdMS_TO_TICKS(200));
-                        
+
                         for (int j = 0; j < led_count; j++)
                         {
                             g_led_ring->set_pixel(g_led_ring, j, 0, 0, 0);
@@ -453,10 +461,10 @@ void on_button_press(RotaryEncoder_t *encoder)
                 }
                 return;
             }
-            
+
             // Disable menu fade-out during OTA process
             main_menu_stop_timer();
-            
+
             // Show checking animation
             if (g_led_ring)
             {
@@ -467,11 +475,11 @@ void on_button_press(RotaryEncoder_t *encoder)
                 }
                 g_led_ring->refresh(g_led_ring);
             }
-            
+
             // Check for updates
             bool update_available = false;
             esp_err_t err = g_ota_manager->check_for_update(g_ota_manager, &update_available);
-            
+
             if (err != ESP_OK)
             {
                 ESP_LOGE(TAG, "Failed to check for updates: %s", esp_err_to_name(err));
@@ -487,7 +495,7 @@ void on_button_press(RotaryEncoder_t *encoder)
                         }
                         g_led_ring->refresh(g_led_ring);
                         vTaskDelay(pdMS_TO_TICKS(200));
-                        
+
                         for (int j = 0; j < led_count; j++)
                         {
                             g_led_ring->set_pixel(g_led_ring, j, 0, 0, 0);
@@ -498,7 +506,7 @@ void on_button_press(RotaryEncoder_t *encoder)
                 }
                 return;
             }
-            
+
             if (update_available)
             {
                 char current_ver[32], latest_ver[32];
@@ -506,7 +514,7 @@ void on_button_press(RotaryEncoder_t *encoder)
                 g_ota_manager->get_latest_version(g_ota_manager, latest_ver);
                 ESP_LOGI(TAG, "Update available: %s -> %s", current_ver, latest_ver);
                 ESP_LOGI(TAG, "Installing update...");
-                
+
                 // Pulse green while updating
                 if (g_led_ring)
                 {
@@ -517,10 +525,10 @@ void on_button_press(RotaryEncoder_t *encoder)
                     }
                     g_led_ring->refresh(g_led_ring);
                 }
-                
+
                 // Perform the update (will restart on success)
                 esp_err_t update_err = g_ota_manager->perform_update(g_ota_manager);
-                
+
                 // If we reach here, update failed
                 ESP_LOGE(TAG, "OTA update failed: %s", esp_err_to_name(update_err));
                 if (g_led_ring)
@@ -534,7 +542,7 @@ void on_button_press(RotaryEncoder_t *encoder)
                         }
                         g_led_ring->refresh(g_led_ring);
                         vTaskDelay(pdMS_TO_TICKS(200));
-                        
+
                         for (int j = 0; j < led_count; j++)
                         {
                             g_led_ring->set_pixel(g_led_ring, j, 0, 0, 0);
@@ -559,7 +567,7 @@ void on_button_press(RotaryEncoder_t *encoder)
                         }
                         g_led_ring->refresh(g_led_ring);
                         vTaskDelay(pdMS_TO_TICKS(200));
-                        
+
                         for (int j = 0; j < led_count; j++)
                         {
                             g_led_ring->set_pixel(g_led_ring, j, 0, 0, 0);
@@ -571,7 +579,7 @@ void on_button_press(RotaryEncoder_t *encoder)
             }
             return;
         }
-        
+
         // For other menu options, just fade out and take picture
         ESP_LOGI(TAG, "Other menu option - taking picture");
         main_menu_stop_timer();
@@ -580,27 +588,27 @@ void on_button_press(RotaryEncoder_t *encoder)
     {
         ESP_LOGI(TAG, "Menu not visible - taking picture");
     }
-    
+
     // Take picture with or without self-timer based on setting
     bool use_self_timer = false;
     if (g_settings)
     {
         use_self_timer = g_settings->settings.self_timer_enabled;
     }
-    
+
     if (use_self_timer && g_led_ring)
     {
         ESP_LOGI(TAG, "Starting 5-second self-timer countdown...");
-        
+
         int led_count = g_led_ring->num_leds;
         int delay_per_led = 1000 / led_count; // 1 second divided by number of LEDs for smooth animation
-        
+
         for (int round = 0; round < 5; round++)
         {
             // Calculate color for this round (fade red to green across the 5 rounds)
             uint8_t red = 255 - ((255 * round) / 5);
             uint8_t green = (255 * round) / 5;
-            
+
             // One complete circle around the ring
             for (int i = 0; i < led_count; i++)
             {
@@ -618,19 +626,19 @@ void on_button_press(RotaryEncoder_t *encoder)
                         g_led_ring->set_pixel(g_led_ring, j, 0, 0, 0);
                     }
                 }
-                
+
                 g_led_ring->refresh(g_led_ring);
                 vTaskDelay(pdMS_TO_TICKS(delay_per_led));
             }
         }
-        
+
         // Flash bright white if flash is enabled (500ms)
         bool flash_enabled = true; // Default to enabled
         if (g_settings)
         {
             flash_enabled = g_settings->settings.flash_enabled;
         }
-        
+
         if (flash_enabled)
         {
             // Turn on flash for 100ms to let it stabilize
@@ -650,7 +658,7 @@ void on_button_press(RotaryEncoder_t *encoder)
         {
             flash_enabled = g_settings->settings.flash_enabled;
         }
-        
+
         if (flash_enabled && g_led_ring)
         {
             int led_count = g_led_ring->num_leds;
@@ -663,28 +671,30 @@ void on_button_press(RotaryEncoder_t *encoder)
             vTaskDelay(pdMS_TO_TICKS(100)); // Pre-flash delay to stabilize
         }
     }
-    
+
     // Take the picture DURING the flash peak
     if (g_camera && g_http_client)
     {
         // Flush old frames from buffer (we have 2 buffers configured)
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < 2; i++)
+        {
             camera_fb_t *flush_fb = g_camera->capture(g_camera);
-            if (flush_fb) {
+            if (flush_fb)
+            {
                 g_camera->return_frame(g_camera, flush_fb);
             }
         }
-        
+
         // Now capture the fresh frame taken during flash
         camera_fb_t *fb = g_camera->capture(g_camera);
-        
+
         // Turn off the flash immediately after capture
         if (g_led_ring)
         {
             g_led_ring->clear(g_led_ring);
             g_led_ring->refresh(g_led_ring);
         }
-        
+
         if (fb)
         {
             ESP_LOGI(TAG, "Picture captured: %zu bytes", fb->len);
@@ -700,12 +710,12 @@ void on_button_press(RotaryEncoder_t *encoder)
             if (auto_print && g_led_ring)
             {
                 ESP_LOGI(TAG, "Auto-print enabled - starting poem loading animation");
-                
+
                 // Ensure LEDs are completely off before starting new animation
                 g_led_ring->clear(g_led_ring);
                 g_led_ring->refresh(g_led_ring);
                 vTaskDelay(pdMS_TO_TICKS(50)); // Small delay to ensure RMT channel is released
-                
+
                 g_stop_poem_loading_animation = false;
                 xTaskCreate(poem_loading_animation_task, "PoemLoadAnim", 4096, (void *)g_led_ring, 5, &g_poem_loading_animation_task);
             }
@@ -719,18 +729,18 @@ void on_button_press(RotaryEncoder_t *encoder)
             else
             {
                 ESP_LOGE(TAG, "Failed to upload picture");
-                
+
                 // Stop animation if auto-print is on
                 if (auto_print)
                 {
                     stop_poem_loading_animation();
                 }
-                
+
                 // Flash red to indicate upload failure
                 if (g_led_ring)
                 {
                     int led_count = g_led_ring->num_leds;
-                    
+
                     // Quick red flash 3 times
                     for (int flash = 0; flash < 3; flash++)
                     {
@@ -740,7 +750,7 @@ void on_button_press(RotaryEncoder_t *encoder)
                         }
                         g_led_ring->refresh(g_led_ring);
                         vTaskDelay(pdMS_TO_TICKS(200));
-                        
+
                         g_led_ring->clear(g_led_ring);
                         g_led_ring->refresh(g_led_ring);
                         vTaskDelay(pdMS_TO_TICKS(200));
@@ -755,7 +765,7 @@ void on_button_press(RotaryEncoder_t *encoder)
             ESP_LOGE(TAG, "Failed to capture picture");
         }
     }
-    
+
     // Turn off LEDs after picture
     if (g_led_ring)
     {
@@ -783,24 +793,24 @@ void stop_poem_loading_animation(void)
 void app_main(void)
 {
     // Set log levels to reduce console clutter
-    esp_log_level_set("*", ESP_LOG_INFO);           // Default: INFO for all
-    esp_log_level_set("wifi", ESP_LOG_DEBUG);       // WiFi to DEBUG
-    esp_log_level_set("wifi_init", ESP_LOG_DEBUG);  // WiFi init to DEBUG
-    esp_log_level_set("phy_init", ESP_LOG_DEBUG);   // PHY init to DEBUG
-    esp_log_level_set("pp", ESP_LOG_DEBUG);         // PP to DEBUG
-    esp_log_level_set("net80211", ESP_LOG_DEBUG);   // net80211 to DEBUG
+    esp_log_level_set("*", ESP_LOG_INFO);                   // Default: INFO for all
+    esp_log_level_set("wifi", ESP_LOG_DEBUG);               // WiFi to DEBUG
+    esp_log_level_set("wifi_init", ESP_LOG_DEBUG);          // WiFi init to DEBUG
+    esp_log_level_set("phy_init", ESP_LOG_DEBUG);           // PHY init to DEBUG
+    esp_log_level_set("pp", ESP_LOG_DEBUG);                 // PP to DEBUG
+    esp_log_level_set("net80211", ESP_LOG_DEBUG);           // net80211 to DEBUG
     esp_log_level_set("esp_netif_handlers", ESP_LOG_DEBUG); // netif to DEBUG
-    esp_log_level_set("WIFI", ESP_LOG_INFO);        // Keep WIFI manager at INFO
-    esp_log_level_set("CAMERA", ESP_LOG_DEBUG);     // Camera to DEBUG
-    esp_log_level_set("camera", ESP_LOG_DEBUG);     // Camera sensor to DEBUG
-    esp_log_level_set("cam_hal", ESP_LOG_DEBUG);    // Camera HAL to DEBUG
-    esp_log_level_set("sccb-ng", ESP_LOG_DEBUG);    // I2C to DEBUG
-    esp_log_level_set("s3 ll_cam", ESP_LOG_DEBUG);  // Low-level cam to DEBUG
-    esp_log_level_set("ov2640", ESP_LOG_DEBUG);     // OV2640 to DEBUG
-    esp_log_level_set("ROTARY_ENCODER", ESP_LOG_DEBUG); // Encoder to DEBUG
-    esp_log_level_set("HTTP_CLIENT", ESP_LOG_DEBUG); // HTTP client to DEBUG
-    esp_log_level_set("REMOTE_CONTROL", ESP_LOG_DEBUG); // Remote control to DEBUG
-    
+    esp_log_level_set("WIFI", ESP_LOG_INFO);                // Keep WIFI manager at INFO
+    esp_log_level_set("CAMERA", ESP_LOG_DEBUG);             // Camera to DEBUG
+    esp_log_level_set("camera", ESP_LOG_DEBUG);             // Camera sensor to DEBUG
+    esp_log_level_set("cam_hal", ESP_LOG_DEBUG);            // Camera HAL to DEBUG
+    esp_log_level_set("sccb-ng", ESP_LOG_DEBUG);            // I2C to DEBUG
+    esp_log_level_set("s3 ll_cam", ESP_LOG_DEBUG);          // Low-level cam to DEBUG
+    esp_log_level_set("ov2640", ESP_LOG_DEBUG);             // OV2640 to DEBUG
+    esp_log_level_set("ROTARY_ENCODER", ESP_LOG_DEBUG);     // Encoder to DEBUG
+    esp_log_level_set("HTTP_CLIENT", ESP_LOG_DEBUG);        // HTTP client to DEBUG
+    esp_log_level_set("REMOTE_CONTROL", ESP_LOG_DEBUG);     // Remote control to DEBUG
+
     // Uncomment the line below to clear stored WiFi credentials (force re-provisioning)
     // wifi_credentials_clear();
 
@@ -847,17 +857,17 @@ void app_main(void)
 
     // Print current settings
     settings->print(settings);
-    
+
     g_log_manager = log_manager_create();
     if (g_log_manager)
     {
         // Build log upload URL (make buffer larger to avoid truncation warning)
         char log_url[300];
-        
+
         // Replace /api/capture with /api/logs
         const char *base_url = settings->settings.server_upload_url;
         char *api_pos = strstr(base_url, "/api/capture");
-        
+
         if (api_pos)
         {
             // Copy everything before /api/capture, then add /api/logs
@@ -869,7 +879,7 @@ void app_main(void)
             // If /api/capture not found, just append /api/logs to base URL
             snprintf(log_url, sizeof(log_url), "%s/api/logs", base_url);
         }
-        
+
         if (g_log_manager->init(g_log_manager, log_url) == ESP_OK)
         {
             // Log manager initialized successfully
@@ -885,13 +895,13 @@ void app_main(void)
     {
         ESP_LOGW(TAG, "Log Manager creation failed - logs will not be sent to server");
     }
-    
+
     LEDRing_t *led_ring = NULL;
     if (settings->settings.led_ring_enabled)
     {
-        
-        led_ring = led_ring_create((gpio_num_t)settings->settings.led_ring_data_pin, 
-                                    settings->settings.led_ring_count);
+
+        led_ring = led_ring_create((gpio_num_t)settings->settings.led_ring_data_pin,
+                                   settings->settings.led_ring_count);
         if (!led_ring)
         {
             ESP_LOGE(TAG, "Failed to create LED Ring object!");
@@ -900,15 +910,15 @@ void app_main(void)
             led_destroy(led);
             return;
         }
-        
+
         // Initialize LED ring
         led_ring->init(led_ring);
         led_ring->set_brightness(led_ring, settings->settings.led_ring_brightness);
-        
+
         // Start startup animation in background task (non-blocking)
         g_stop_startup_animation = false;
         xTaskCreate(startup_animation_task, "StartupAnim", 4096, (void *)led_ring, 5, &g_startup_animation_task);
-        
+
         // Assign to global for button callback access
         g_led_ring = led_ring;
     }
@@ -971,7 +981,7 @@ void app_main(void)
             // Stop startup animation if still running
             g_stop_startup_animation = true;
             vTaskDelay(pdMS_TO_TICKS(100)); // Give startup animation time to clean up
-            
+
             // Start provisioning pulse
             g_stop_provisioning_pulse = false;
             xTaskCreate(provisioning_pulse_task, "ProvisionPulse", 4096, (void *)led_ring, 5, &g_provisioning_pulse_task);
@@ -981,14 +991,14 @@ void app_main(void)
         if (!provisioning->wait_for_credentials(provisioning, 300000))
         {
             ESP_LOGE(TAG, "Provisioning timeout! Restarting...");
-            
+
             // Stop pulsing animation
             if (led_ring)
             {
                 g_stop_provisioning_pulse = true;
                 vTaskDelay(pdMS_TO_TICKS(100)); // Give task time to exit
             }
-            
+
             wifi_provisioning_destroy(provisioning);
             settings_manager_destroy(settings);
             camera_destroy(camera);
@@ -1065,9 +1075,8 @@ void app_main(void)
             .rx_pin = (gpio_num_t)settings->settings.printer_rx_pin,
             .rts_pin = (gpio_num_t)settings->settings.printer_rts_pin,
             .baud_rate = settings->settings.printer_baud_rate,
-            .max_print_width = settings->settings.printer_max_width
-        };
-        
+            .max_print_width = settings->settings.printer_max_width};
+
         g_thermal_printer = thermal_printer_create(printer_config);
         if (!g_thermal_printer)
         {
@@ -1091,8 +1100,10 @@ void app_main(void)
     if (!remote_control)
     {
         ESP_LOGE(TAG, "Failed to create Remote Control object!");
-        if (g_thermal_printer) thermal_printer_destroy(g_thermal_printer);
-        if (g_log_manager) log_manager_destroy(g_log_manager);
+        if (g_thermal_printer)
+            thermal_printer_destroy(g_thermal_printer);
+        if (g_log_manager)
+            log_manager_destroy(g_log_manager);
         http_client_destroy(http_client);
         settings_manager_destroy(settings);
         wifi_destroy(wifi);
@@ -1116,7 +1127,8 @@ void app_main(void)
             settings_manager_destroy(settings);
             wifi_destroy(wifi);
             camera_destroy(camera);
-            if (led_ring) led_ring_destroy(led_ring);
+            if (led_ring)
+                led_ring_destroy(led_ring);
             led_destroy(led);
             return;
         }
@@ -1171,12 +1183,12 @@ void app_main(void)
     wifi->wait_for_connection_retry(wifi);
 
     // WiFi connected! Show green flash on LED ring
-    if (led_ring)
+    if (wifi->connected && led_ring)
     {
         // Stop startup animation if still running
         g_stop_startup_animation = true;
         vTaskDelay(pdMS_TO_TICKS(100)); // Give startup animation time to clean up
-        
+
         // Show green flash
         led_ring_wifi_connected_flash(led_ring);
     }
@@ -1189,15 +1201,15 @@ void app_main(void)
     if (g_ota_manager)
     {
         // Validate OTA settings before initializing
-        if (strlen(settings->settings.ota_github_owner) == 0 || 
+        if (strlen(settings->settings.ota_github_owner) == 0 ||
             strlen(settings->settings.ota_github_repo) == 0)
         {
             ESP_LOGW(TAG, "OTA settings incomplete - using defaults");
             // Use defaults if not configured
             esp_err_t ota_err = g_ota_manager->init(g_ota_manager,
-                                                     DEFAULT_OTA_GITHUB_OWNER,
-                                                     DEFAULT_OTA_GITHUB_REPO,
-                                                     DEFAULT_OTA_TESTING_BRANCH);
+                                                    DEFAULT_OTA_GITHUB_OWNER,
+                                                    DEFAULT_OTA_GITHUB_REPO,
+                                                    DEFAULT_OTA_TESTING_BRANCH);
             if (ota_err != ESP_OK)
             {
                 ESP_LOGE(TAG, "Failed to initialize OTA Manager with defaults: %s", esp_err_to_name(ota_err));
@@ -1208,16 +1220,15 @@ void app_main(void)
         else
         {
             esp_err_t ota_err = g_ota_manager->init(g_ota_manager,
-                                                     settings->settings.ota_github_owner,
-                                                     settings->settings.ota_github_repo,
-                                                     settings->settings.ota_testing_branch);
+                                                    settings->settings.ota_github_owner,
+                                                    settings->settings.ota_github_repo,
+                                                    settings->settings.ota_testing_branch);
             if (ota_err == ESP_OK)
             {
                 // Set update channel from settings (0=Release, 1=Testing)
-                ota_channel_t channel = (settings->settings.ota_update_channel == 0) ? 
-                                       OTA_CHANNEL_RELEASE : OTA_CHANNEL_TESTING;
+                ota_channel_t channel = (settings->settings.ota_update_channel == 0) ? OTA_CHANNEL_RELEASE : OTA_CHANNEL_TESTING;
                 g_ota_manager->set_channel(g_ota_manager, channel);
-                
+
                 ESP_LOGI(TAG, "OTA updates can be checked via web interface");
             }
             else
@@ -1248,10 +1259,11 @@ void app_main(void)
     }
     // Get firmware version if OTA manager is initialized
     const char *firmware_version = "unknown";
-    if (g_ota_manager && g_ota_manager->initialized) {
+    if (g_ota_manager && g_ota_manager->initialized)
+    {
         firmware_version = g_ota_manager->current_version;
     }
-    
+
     ESP_LOGI(TAG, "Startup completed - Firmware: %s | Camera: %s | WiFi: %s | IP: %s | Printer: %s | Logs: %s",
              firmware_version,
              camera->initialized ? "✓" : "✗",
@@ -1263,7 +1275,7 @@ void app_main(void)
     // Calculate log send interval based on settings
     uint32_t log_upload_interval_s = settings->settings.log_upload_interval;
     uint32_t log_send_ticks = (log_upload_interval_s * 1000) / 10000; // How many 10-second loops per upload
-    
+
     // Log status every minute and send logs based on settings
     uint32_t loop_count = 0;
     uint32_t log_send_counter = 0;
@@ -1271,27 +1283,27 @@ void app_main(void)
     {
         vTaskDelay(10000 / portTICK_PERIOD_MS); // Wait 10 seconds
         log_send_counter++;
-        
+
         // Send logs based on settings interval (if enabled)
         if (g_log_manager && settings->settings.log_upload_enabled)
         {
             int queued = g_log_manager->get_queued_count(g_log_manager);
-            
+
             // If there are queued logs, send them immediately without waiting for interval
             if (queued > 0 && log_send_counter >= log_send_ticks)
             {
                 log_send_counter = 0; // Reset counter
-                
+
                 // Keep sending batches until queue is empty
                 while (queued > 0)
                 {
                     esp_err_t log_result = g_log_manager->send_logs(g_log_manager);
-                    
+
                     // Flash red if log upload fails
                     if (log_result != ESP_OK && g_led_ring)
                     {
                         int led_count = g_led_ring->num_leds;
-                        
+
                         // Quick red flash 2 times to indicate log upload failure
                         for (int flash = 0; flash < 2; flash++)
                         {
@@ -1301,20 +1313,20 @@ void app_main(void)
                             }
                             g_led_ring->refresh(g_led_ring);
                             vTaskDelay(pdMS_TO_TICKS(150));
-                            
+
                             g_led_ring->clear(g_led_ring);
                             g_led_ring->refresh(g_led_ring);
                             vTaskDelay(pdMS_TO_TICKS(150));
                         }
                         break; // Stop trying if upload fails
                     }
-                    
+
                     // Check how many logs remain
                     queued = g_log_manager->get_queued_count(g_log_manager);
                 }
             }
         }
-        
+
         // Log status every minute (6 x 10s)
         if (log_send_counter % 6 == 0)
         {
@@ -1325,8 +1337,10 @@ void app_main(void)
     }
 
     // Cleanup (never reached, but good practice)
-    if (g_thermal_printer) thermal_printer_destroy(g_thermal_printer);
-    if (g_log_manager) log_manager_destroy(g_log_manager);
+    if (g_thermal_printer)
+        thermal_printer_destroy(g_thermal_printer);
+    if (g_log_manager)
+        log_manager_destroy(g_log_manager);
     rotary_encoder_destroy(rotary);
     remote_control_destroy(remote_control);
     http_client_destroy(http_client);

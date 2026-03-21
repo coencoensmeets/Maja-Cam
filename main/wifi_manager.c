@@ -27,7 +27,7 @@ static void wifi_event_handler_impl(void *arg, esp_event_base_t event_base,
         wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *)event_data;
         ESP_LOGW(TAG, "Disconnected from WiFi (reason: %d), retrying in 1 second...", event->reason);
         wifi->connected = false;
-        
+
         // Wait 1 second before retrying to avoid rapid reconnection attempts
         vTaskDelay(pdMS_TO_TICKS(1000));
         esp_wifi_connect();
@@ -61,7 +61,7 @@ static esp_err_t wifi_init_impl(WiFi_t *self)
     wifi_config_t wifi_config = {0};
     strncpy((char *)wifi_config.sta.ssid, self->ssid, sizeof(wifi_config.sta.ssid) - 1);
     strncpy((char *)wifi_config.sta.password, self->password, sizeof(wifi_config.sta.password) - 1);
-    
+
     // Improved WiFi settings for better reliability
     wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     wifi_config.sta.pmf_cfg.capable = true;
@@ -71,10 +71,10 @@ static esp_err_t wifi_init_impl(WiFi_t *self)
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    
+
     // Set WiFi power save mode to minimum modem sleep for better reliability
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
-    
+
     ESP_ERROR_CHECK(esp_wifi_start());
 
     ESP_LOGI(TAG, "WiFi connecting to %s...", self->ssid);
@@ -110,9 +110,9 @@ static void wifi_wait_for_connection_retry_impl(WiFi_t *self)
     ESP_LOGI(TAG, "Board will restart if no connection within 20 seconds");
 
     uint32_t elapsed_ms = 0;
-    const uint32_t check_interval_ms = 100;      // Check every 100ms to detect button presses
-    const uint32_t restart_timeout_ms = 20000;   // Restart after 20 seconds
-    const uint32_t button_reset_hold_ms = 3000;  // Hold reset button 3s to clear WiFi creds
+    const uint32_t check_interval_ms = 100;     // Check every 100ms to detect button presses
+    const uint32_t restart_timeout_ms = 20000;  // Restart after 20 seconds
+    const uint32_t button_reset_hold_ms = 3000; // Hold reset button 3s to clear WiFi creds
     uint32_t button_hold_ms = 0;
 
     // Use default encoder switch pin if available
@@ -146,11 +146,8 @@ static void wifi_wait_for_connection_retry_impl(WiFi_t *self)
         if (elapsed_ms >= restart_timeout_ms)
         {
             uint32_t seconds_elapsed = elapsed_ms / 1000;
-            ESP_LOGE(TAG, "WiFi connection failed after %lu seconds!", seconds_elapsed);
-            ESP_LOGE(TAG, "Restarting board in 3 seconds...");
-            self->status_led->blink(self->status_led, 10); // Rapid blink before restart
-            vTaskDelay(3000 / portTICK_PERIOD_MS);
-            esp_restart(); // Restart the board
+            ESP_LOGW(TAG, "WiFi connection failed after %lu seconds, continuing offline...", seconds_elapsed);
+            break; // Stop blocking, continue offline so main app can run
         }
 
         // Log status every 5 seconds

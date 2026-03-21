@@ -1,102 +1,46 @@
-# ESP32-S3 Camera Project# _Sample project_
+# Maja-Cam
 
-A WiFi-enabled camera project for ESP32-S3 with web streaming interface, WiFi provisioning portal, and JSON-based configuration management.(See the README.md file in the upper level 'examples' directory for more information about examples.)
+**Maja-Cam** is an ESP32-S3 embedded firmware project designed to operate as a smart, connected camera. It captures images, manages local network configurations, interfaces with local peripherals, and integrates seamlessly with a Flask-based backend for remote control and image storage.
 
-## Features
-This is the simplest buildable example. The example is used by command `idf.py create-project`
+---
 
-that copies the project to user specified path and set it's name. For more information follow the [docs page](https://docs.espressif.com/projects/esp-idf/en/latest/api-guides/build-system.html#start-a-new-project)
+## ?? Key Features
 
-- **OV2640 Camera Support** - Live video streaming over HTTP
+*   **Smart Image Capture:** High-fidelity JPEG capture using the OV2640 camera module.
+*   **Flask Backend Integration:** Automatically uploads captured images to a central API (`/api/capture`).
+*   **Over-The-Air (OTA) Updates:** Seamless remote firmware upgrades through the custom Flask backend using dual fallback application partitions.
+*   **Remote Remote Control:** Periodically polls a remote dashboard (`/api/remote-status`) to trigger local actions.
+*   **Easy WiFi Setup:** Supports pre-configured credentials or an intuitive Captive Portal fallback (`ESP32-Camera-Setup`).
+*   **Local Hardware UI:** Navigate onboard menus via a Rotary Encoder and view system status via an Addressable LED Ring.
+*   **Physical Interactivity:** UART Thermal Printer support to print physical tickets and receipts.
+*   **Persistent Configuration:** JSON-based configuration management stored securely in the ESP32's SPIFFS filesystem.
 
-- **WiFi Provisioning Portal** - Easy setup via captive portal when no credentials configured
+---
 
-- **JSON Configuration** - Persistent settings stored in SPIFFS filesystem
+## ??? Hardware Requirements
 
-- **Web Server** - Access camera stream from any browser on your network## How to use example
+*   **Microcontroller:** ESP32-S3 (with FreeRTOS)
+*   **Camera Module:** OV2640
+*   **Input:** Rotary Encoder (for local menu navigation)
+*   **Output:** 
+    *   Addressable LED Ring (WS2812B or similar)
+    *   Thermal Printer (via UART)
+*   **Cable:** USB-UART cable for programming and power
 
-- **LED Status Indicators** - Visual feedback for WiFi and system statusWe encourage the users to use the example as a template for the new projects.
+---
 
-A recommended way is to follow the instructions on a [docs page](https://docs.espressif.com/projects/esp-idf/en/latest/api-guides/build-system.html#start-a-new-project).
+## ?? Quick Start
 
-## Hardware Requirements
+### 1. Initial Setup
 
-## Example folder contents
+Clone the repository and set up your local configuration files.
 
-- ESP32-S3 development board
-
-- OV2640 camera moduleThe project **sample_project** contains one source file in C language [main.c](main/main.c). The file is located in folder [main](main).
-
-- USB cable for programming
-
-ESP-IDF projects are built using CMake. The project build configuration is contained in `CMakeLists.txt`
-
-## Quick Startfiles that provide set of directives and instructions describing the project's source files and targets
-
-(executable, library, or both).
-
-### 1. Clone and Setup
-
-Below is short explanation of remaining files in the project folder.
-
-````bash
-
-git clone <repository-url>```
-
-cd Poem_cam├── CMakeLists.txt
-
-```├── main
-
-│   ├── CMakeLists.txt
-
-### 2. Configure WiFi Credentials│   └── main.c
-
-└── README.md                  This is the file you are currently reading
-
-Create your WiFi credentials file:```
-
-Additionally, the sample project contains Makefile and component.mk files, used for the legacy Make based build system.
-
-```bashThey are not used or needed when building with CMake and idf.py.
-
-# Copy the template
+```bash
+# Create the WiFi credentials file from the template
 cp data/secrets.json.example data/secrets.json
-
-# Edit data/secrets.json with your WiFi credentials
-````
-
-**data/secrets.json:**
-
-```json
-{
-  "wifi_ssid": "YourWiFiNetwork",
-  "wifi_password": "YourPassword"
-}
 ```
 
-### 3. Build and Flash
-
-```bash
-# Build, flash firmware and SPIFFS data in one command
-idf.py build flash monitor
-
-# Or flash everything including partition table
-idf.py fullclean build flash monitor
-```
-
-The `idf.py flash` command automatically includes the SPIFFS filesystem with your JSON configuration files.
-
-### 4. Access the Camera
-
-- **With WiFi configured**: Connect to your network and access `http://<ESP32-IP>`
-- **Without WiFi configured**: Connect to `ESP32-Camera-Setup` WiFi network and navigate to `http://192.168.4.1` to configure
-
-## WiFi Configuration Options
-
-### Option 1: Pre-configured Credentials (Recommended)
-
-Edit `data/secrets.json` before flashing:
-
+Edit `data/secrets.json` to include your default Wi-Fi network:
 ```json
 {
   "wifi_ssid": "YourNetwork",
@@ -104,177 +48,55 @@ Edit `data/secrets.json` before flashing:
 }
 ```
 
-Then flash with `idf.py build flash monitor` - credentials are automatically included.
+Optional: Adjust your default camera parameters in `data/settings.json`.
 
-### Option 2: Provisioning Portal (First-time Setup)
+### 2. Build and Flash
 
-If no credentials are configured:
-
-1. ESP32 creates WiFi network: **ESP32-Camera-Setup**
-2. Connect to this network (password: `setupesp32`)
-3. Browser automatically opens to `http://192.168.4.1`
-4. Enter your WiFi credentials in the web form
-5. ESP32 saves credentials and reboots
-6. Connects to your network automatically
-
-## Configuration Files
-
-### secrets.json (WiFi Credentials)
-
-```json
-{
-  "wifi_ssid": "YourNetwork",
-  "wifi_password": "YourPassword"
-}
-```
-
-### settings.json (Camera & System Settings)
-
-```json
-{
-  "camera_resolution": 13,
-  "camera_quality": 12,
-  "camera_brightness": 0,
-  "camera_contrast": 0,
-  "camera_saturation": 0,
-  "system_led_enabled": true,
-  "system_hostname": "esp32-camera"
-}
-```
-
-## Project Structure
-
-```
-Poem_cam/
-├── main/
-│   ├── main.c                 # Application entry point
-│   ├── camera.c/h             # Camera driver
-│   ├── web_server.c/h         # HTTP server for streaming
-│   ├── wifi_manager.c/h       # WiFi connection management
-│   ├── wifi_provisioning.c/h  # Captive portal for setup
-│   ├── settings_manager.c/h   # JSON configuration management
-│   └── led.c/h                # LED status indicators
-├── data/
-│   ├── secrets.json           # Your WiFi credentials (gitignored)
-│   ├── secrets.json.example   # Template
-│   ├── settings.json          # Camera/system configuration
-│   └── settings.json.example  # Template
-├── docs/
-│   ├── API_REFERENCE.md       # API documentation
-│   ├── ARCHITECTURE.md        # System architecture
-│   ├── ORGANIZATION.md        # Code organization
-│   └── SPIFFS.md              # SPIFFS filesystem details
-├── partitions.csv             # Partition table (includes 960KB SPIFFS)
-└── CMakeLists.txt             # Build configuration
-```
-
-## Common Commands
+Ensure you have **ESP-IDF v5.0+** installed and sourced in your terminal.
 
 ```bash
-# Full clean build and flash
+# Build the application, flash to the board, and open the serial monitor
 idf.py fullclean build flash monitor
-
-# Quick rebuild and flash
-idf.py build flash monitor
-
-# Just monitor serial output
-idf.py monitor
-
-# Flash only bootloader
-idf.py bootloader-flash
-
-# Erase entire flash
-idf.py erase-flash
-
-# Clean build artifacts
-idf.py clean
 ```
 
-## Troubleshooting
+### 3. Usage & Access
 
-### WiFi Connection Issues
+*   **Pre-configured:** If `secrets.json` matches an available network, the ESP32 will connect automatically. Check the serial monitor for the assigned IP address, and visit `http://<ESP32-IP>` in your browser.
+*   **Captive Portal:** If no network is found, connect to the `ESP32-Camera-Setup` WiFi access point (Password: `setupesp32`), and a captive portal will prompt you to enter credentials.
 
-**Problem:** ESP32 not connecting to WiFi
+---
 
-- Check `data/secrets.json` has correct credentials
-- Ensure 2.4GHz WiFi (ESP32 doesn't support 5GHz)
-- Check signal strength - move ESP32 closer to router
-- Use provisioning portal to reconfigure
+## ??? Architecture overview
 
-**Problem:** Provisioning portal not appearing
+Maja-Cam relies on FreeRTOS to handle multiple concurrent tasks without blocking:
 
-- Look for `ESP32-Camera-Setup` WiFi network
-- Connect manually if auto-redirect fails
-- Navigate to `http://192.168.4.1` in browser
-- Disable mobile data on phone to prevent routing conflicts
+1.  **Main Task:** Master state machine and peripheral initialization.
+2.  **Camera Task:** Captures frames from the OV2640.
+3.  **WiFi/HTTP Tasks:** Manages network connections and local HTTP streaming.
+4.  **Upload/Remote Tasks:** Handles Flask backend integration (`POST` images, `GET` commands).
+5.  **UI Tasks:** Manages Rotary Encoder inputs, Thermal Printer processes, and LED Ring animations.
+6.  **OTA Manager:** Background orchestration of seamless Over-The-Air firmware updates.
 
-### Camera Issues
+SPIFFS partitions are utilized to store system settings (`settings.json`) and run logs (`app.log`) persistently across reboots. Dual application partitions (`ota_0` and `ota_1`) are utilized to ensure safe remote firmware version rollbacks on boot failures.
 
-**Problem:** Camera initialization failed
+---
 
-- Check camera ribbon cable connections
-- Verify camera is OV2640 model
-- Ensure sufficient power supply (camera draws significant current)
-- Check GPIO pin configuration in `camera.h`
+## ?? Documentation
 
-**Problem:** Poor image quality
+For more detailed technical information, please refer to the documents in the `docs/` folder:
 
-- Adjust `camera_quality` in `settings.json` (lower = better, 10-12 recommended)
-- Increase `camera_resolution` for higher resolution
-- Adjust lighting conditions
-- Clean camera lens
+*   [API Reference](docs/API_REFERENCE.md)
+*   [Architecture](docs/ARCHITECTURE.md)
+*   [SPIFFS Usage](docs/SPIFFS.md)
+*   [Flask Integration](docs/FLASK_INTEGRATION.md)
+*   [OTA Update System](docs/OTA_UPDATE_SYSTEM.md)
+*   [OTA Safety Features](docs/OTA_SAFETY_FEATURES.md)
 
-### Build Issues
+---
 
-**Problem:** SPIFFS partition not found
+## ?? Troubleshooting
 
-- Ensure `partitions.csv` is present
-- Run `idf.py fullclean build flash`
-- Check partition table in build output
+*   **Camera Initialization Failed:** Check physical pins and ribbon cables. Ensure OV2640 is used.
+*   **WiFi Disconnects:** Verify it is a 2.4GHz network. The ESP32 does not support 5GHz natively.
+*   **Flash Errors:** Ensure the device is securely plugged in and the proper serial driver is active. If partition errors occur, run `idf.py erase-flash`.
 
-**Problem:** JSON files not loading
-
-- Verify files exist in `data/` folder
-- Check file permissions
-- Ensure SPIFFS was flashed (automatic with `idf.py flash`)
-- Monitor serial output for filesystem errors
-
-### Memory Issues
-
-**Problem:** Out of memory errors
-
-- Reduce image resolution in `settings.json`
-- Close other browser tabs/connections
-- Check for memory leaks in serial monitor
-- Reduce frame buffer allocation in camera config
-
-## LED Status Indicators
-
-- **Blinking slowly** - Connecting to WiFi
-- **Solid on** - WiFi connected successfully
-- **Blinking rapidly** - Error condition
-- **Off** - Disabled in settings or system idle
-
-## Security Notes
-
-- `data/secrets.json` is gitignored by default - your credentials stay private
-- Change provisioning portal password in `wifi_provisioning.c` (default: `setupesp32`)
-- Web server has no authentication by default - add if needed
-- Consider static IP configuration for production deployments
-
-## Development
-
-See documentation in `docs/` folder:
-
-- `API_REFERENCE.md` - Detailed API documentation
-- `ARCHITECTURE.md` - System design and component interaction
-- `ORGANIZATION.md` - Code structure and patterns
-- `SPIFFS.md` - Filesystem and data storage details
-
-## License
-
-[Your License Here]
-
-## Contributing
-
-[Your Contributing Guidelines Here]
