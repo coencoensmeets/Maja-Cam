@@ -65,8 +65,27 @@ static void polling_task(void *arg)
 
     ESP_LOGI(TAG, "Polling task started (interval: %d ms)", self->poll_interval_ms);
 
+    bool was_waiting_for_wifi = false;
     while (self->running)
     {
+        // Skip polling until WiFi is connected to avoid flooding logs with
+        // "Host is unreachable" errors during boot / reconnect.
+        if (self->wifi && !self->wifi->connected)
+        {
+            if (!was_waiting_for_wifi)
+            {
+                ESP_LOGI(TAG, "Waiting for WiFi before polling server...");
+                was_waiting_for_wifi = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+        if (was_waiting_for_wifi)
+        {
+            ESP_LOGI(TAG, "WiFi connected, resuming polling");
+            was_waiting_for_wifi = false;
+        }
+
         // Check for capture command
         char command_url[300];
         snprintf(command_url, sizeof(command_url), "%s/api/command", self->server_url);
@@ -457,9 +476,17 @@ static void polling_task(void *arg)
                                         }
                                     }
 
-                                    // Handle flip settings
+                                    // Handle flip settings. `vflip`/`hmirror` is
+                                    // the wire name the web settings page uses;
+                                    // `flip_vertical`/`flip_horizontal` is the
+                                    // canonical name in settings.json and the
+                                    // Flutter UI. Accept both.
                                     cJSON *vflip = cJSON_GetObjectItem(camera, "vflip");
+                                    if (!vflip)
+                                        vflip = cJSON_GetObjectItem(camera, "flip_vertical");
                                     cJSON *hmirror = cJSON_GetObjectItem(camera, "hmirror");
+                                    if (!hmirror)
+                                        hmirror = cJSON_GetObjectItem(camera, "flip_horizontal");
                                     if ((vflip && cJSON_IsBool(vflip)) || (hmirror && cJSON_IsBool(hmirror)))
                                     {
                                         if (hmirror && cJSON_IsBool(hmirror))
@@ -487,8 +514,20 @@ static void polling_task(void *arg)
                                         }
                                     }
 
-                                    // Handle flash enabled setting
-                                    cJSON *flash_enabled = cJSON_GetObjectItem(camera, "flash_enabled");
+                                }
+
+                                // Capture-feature booleans. settings.json keeps
+                                // these under "camera_features" while the web
+                                // settings page pushes them inside "camera" —
+                                // read either, so a client that sends only the
+                                // canonical section (the Flutter app) is not
+                                // silently ignored.
+                                {
+                                    cJSON *features = cJSON_GetObjectItem(settings, "camera_features");
+
+                                    cJSON *flash_enabled = features ? cJSON_GetObjectItem(features, "flash_enabled") : NULL;
+                                    if (!flash_enabled && camera)
+                                        flash_enabled = cJSON_GetObjectItem(camera, "flash_enabled");
                                     if (flash_enabled && cJSON_IsBool(flash_enabled))
                                     {
                                         self->settings->settings.flash_enabled = cJSON_IsTrue(flash_enabled);
@@ -496,8 +535,9 @@ static void polling_task(void *arg)
                                         ESP_LOGI(TAG, "Flash enabled updated to %s", self->settings->settings.flash_enabled ? "true" : "false");
                                     }
 
-                                    // Handle self-timer enabled setting
-                                    cJSON *self_timer_enabled = cJSON_GetObjectItem(camera, "self_timer_enabled");
+                                    cJSON *self_timer_enabled = features ? cJSON_GetObjectItem(features, "self_timer_enabled") : NULL;
+                                    if (!self_timer_enabled && camera)
+                                        self_timer_enabled = cJSON_GetObjectItem(camera, "self_timer_enabled");
                                     if (self_timer_enabled && cJSON_IsBool(self_timer_enabled))
                                     {
                                         self->settings->settings.self_timer_enabled = cJSON_IsTrue(self_timer_enabled);
@@ -505,8 +545,9 @@ static void polling_task(void *arg)
                                         ESP_LOGI(TAG, "Self-timer enabled updated to %s", self->settings->settings.self_timer_enabled ? "true" : "false");
                                     }
 
-                                    // Handle auto-print enabled setting
-                                    cJSON *auto_print_enabled = cJSON_GetObjectItem(camera, "auto_print_enabled");
+                                    cJSON *auto_print_enabled = features ? cJSON_GetObjectItem(features, "auto_print_enabled") : NULL;
+                                    if (!auto_print_enabled && camera)
+                                        auto_print_enabled = cJSON_GetObjectItem(camera, "auto_print_enabled");
                                     if (auto_print_enabled && cJSON_IsBool(auto_print_enabled))
                                     {
                                         self->settings->settings.auto_print_enabled = cJSON_IsTrue(auto_print_enabled);
@@ -585,6 +626,133 @@ static void polling_task(void *arg)
                                             settings_changed = true;
                                             ESP_LOGI(TAG, "Log queue size updated to %d (restart required)", self->settings->settings.log_queue_size);
                                         }
+                                    }
+                                }
+
+                                // Update thermal printer heating parameters live.
+                                // Pin/UART/baud changes are not applied at runtime
+                                // because the UART driver is already bound — those
+                                // require a reboot.
+                                cJSON *printer_settings = cJSON_GetObjectItem(settings, "thermal_printer");
+                                if (printer_settings)
+                                {
+                                    cJSON *max_dots = cJSON_GetObjectItem(printer_settings, "max_heating_dots");
+                                    if (max_dots && cJSON_IsNumber(max_dots) &&
+                                        max_dots->valueint >= 0 && max_dots->valueint <= 255)
+                                    {
+                                        self->settings->settings.printer_max_heating_dots = (uint8_t)max_dots->valueint;
+                                        settings_changed = true;
+                                        ESP_LOGI(TAG, "Printer max_heating_dots updated to %d", max_dots->valueint);
+                                    }
+
+                                    cJSON *heat_time = cJSON_GetObjectItem(printer_settings, "heating_time");
+                                    if (heat_time && cJSON_IsNumber(heat_time) &&
+                                        heat_time->valueint >= 3 && heat_time->valueint <= 255)
+                                    {
+                                        self->settings->settings.printer_heating_time = (uint8_t)heat_time->valueint;
+                                        settings_changed = true;
+                                        ESP_LOGI(TAG, "Printer heating_time updated to %d (%dµs)", heat_time->valueint, heat_time->valueint * 10);
+                                    }
+
+                                    cJSON *heat_interval = cJSON_GetObjectItem(printer_settings, "heating_interval");
+                                    if (heat_interval && cJSON_IsNumber(heat_interval) &&
+                                        heat_interval->valueint >= 0 && heat_interval->valueint <= 255)
+                                    {
+                                        self->settings->settings.printer_heating_interval = (uint8_t)heat_interval->valueint;
+                                        settings_changed = true;
+                                        ESP_LOGI(TAG, "Printer heating_interval updated to %d (%dµs)", heat_interval->valueint, heat_interval->valueint * 10);
+                                    }
+
+                                    cJSON *density = cJSON_GetObjectItem(printer_settings, "density");
+                                    if (density && cJSON_IsNumber(density) &&
+                                        density->valueint >= 0 && density->valueint <= 31)
+                                    {
+                                        self->settings->settings.printer_density = (uint8_t)density->valueint;
+                                        settings_changed = true;
+                                        ESP_LOGI(TAG, "Printer density updated to %d (%d%%)", density->valueint, 50 + 5 * density->valueint);
+                                    }
+
+                                    cJSON *break_time = cJSON_GetObjectItem(printer_settings, "break_time");
+                                    if (break_time && cJSON_IsNumber(break_time) &&
+                                        break_time->valueint >= 0 && break_time->valueint <= 7)
+                                    {
+                                        self->settings->settings.printer_break_time = (uint8_t)break_time->valueint;
+                                        settings_changed = true;
+                                        ESP_LOGI(TAG, "Printer break_time updated to %d (%dµs)", break_time->valueint, break_time->valueint * 250);
+                                    }
+
+                                    cJSON *bold = cJSON_GetObjectItem(printer_settings, "bold");
+                                    if (bold && cJSON_IsBool(bold))
+                                    {
+                                        self->settings->settings.printer_bold = cJSON_IsTrue(bold);
+                                        settings_changed = true;
+                                        ESP_LOGI(TAG, "Printer bold updated to %s", cJSON_IsTrue(bold) ? "ON" : "OFF");
+                                    }
+
+                                    cJSON *double_strike = cJSON_GetObjectItem(printer_settings, "double_strike");
+                                    if (double_strike && cJSON_IsBool(double_strike))
+                                    {
+                                        self->settings->settings.printer_double_strike = cJSON_IsTrue(double_strike);
+                                        settings_changed = true;
+                                        ESP_LOGI(TAG, "Printer double_strike updated to %s", cJSON_IsTrue(double_strike) ? "ON" : "OFF");
+                                    }
+
+                                    cJSON *heating_cmds = cJSON_GetObjectItem(printer_settings, "heating_commands");
+                                    if (heating_cmds && cJSON_IsBool(heating_cmds))
+                                    {
+                                        self->settings->settings.printer_heating_commands = cJSON_IsTrue(heating_cmds);
+                                        if (self->printer)
+                                        {
+                                            self->printer->config.heating_commands =
+                                                self->settings->settings.printer_heating_commands;
+                                        }
+                                        settings_changed = true;
+                                        ESP_LOGI(TAG, "Printer heating_commands updated to %s", cJSON_IsTrue(heating_cmds) ? "ON" : "OFF");
+                                    }
+
+                                    cJSON *line_delay = cJSON_GetObjectItem(printer_settings, "line_delay_ms");
+                                    if (line_delay && cJSON_IsNumber(line_delay) &&
+                                        line_delay->valueint >= 100 && line_delay->valueint <= 3000)
+                                    {
+                                        self->settings->settings.printer_line_delay_ms = (uint16_t)line_delay->valueint;
+                                        if (self->printer)
+                                        {
+                                            // print_line reads this from the cached config on
+                                            // every line, so it applies to the next print.
+                                            self->printer->config.line_delay_ms =
+                                                self->settings->settings.printer_line_delay_ms;
+                                        }
+                                        settings_changed = true;
+                                        ESP_LOGI(TAG, "Printer line_delay_ms updated to %d", line_delay->valueint);
+                                    }
+
+                                    // Apply immediately so the next print uses the new values.
+                                    // Gated: on a printer that doesn't implement ESC 7 / DC2 #,
+                                    // every settings push would otherwise spray the argument
+                                    // bytes into the line buffer, to surface as junk ahead of
+                                    // the next print.
+                                    if (self->printer && self->printer->initialized &&
+                                        self->printer->config.heating_commands)
+                                    {
+                                        self->printer->set_print_density(
+                                            self->printer,
+                                            self->settings->settings.printer_max_heating_dots,
+                                            self->settings->settings.printer_heating_time,
+                                            self->settings->settings.printer_heating_interval);
+                                        self->printer->set_density(
+                                            self->printer,
+                                            self->settings->settings.printer_density,
+                                            self->settings->settings.printer_break_time);
+                                    }
+                                    if (self->printer && self->printer->initialized)
+                                    {
+                                        // Update the cached config too — print_poem restores
+                                        // bold from it after the title, so a stale value there
+                                        // would undo this on the very next print.
+                                        self->printer->config.bold = self->settings->settings.printer_bold;
+                                        self->printer->config.double_strike = self->settings->settings.printer_double_strike;
+                                        self->printer->set_bold(self->printer, self->printer->config.bold);
+                                        self->printer->set_double_strike(self->printer, self->printer->config.double_strike);
                                     }
                                 }
 
@@ -771,6 +939,21 @@ esp_err_t remote_control_send_current_settings(RemoteControl_t *self)
     cJSON_AddNumberToObject(led_ring, "count", self->settings->settings.led_ring_count);
     cJSON_AddItemToObject(root, "led_ring", led_ring);
 
+    // Thermal printer heating params — round-tripped so the Flutter UI shows
+    // the live values rather than stale defaults.
+    cJSON *thermal_printer = cJSON_CreateObject();
+    cJSON_AddBoolToObject(thermal_printer, "enabled", self->settings->settings.printer_enabled);
+    cJSON_AddNumberToObject(thermal_printer, "max_heating_dots", self->settings->settings.printer_max_heating_dots);
+    cJSON_AddNumberToObject(thermal_printer, "heating_time", self->settings->settings.printer_heating_time);
+    cJSON_AddNumberToObject(thermal_printer, "heating_interval", self->settings->settings.printer_heating_interval);
+    cJSON_AddNumberToObject(thermal_printer, "density", self->settings->settings.printer_density);
+    cJSON_AddNumberToObject(thermal_printer, "break_time", self->settings->settings.printer_break_time);
+    cJSON_AddBoolToObject(thermal_printer, "bold", self->settings->settings.printer_bold);
+    cJSON_AddBoolToObject(thermal_printer, "double_strike", self->settings->settings.printer_double_strike);
+    cJSON_AddBoolToObject(thermal_printer, "heating_commands", self->settings->settings.printer_heating_commands);
+    cJSON_AddNumberToObject(thermal_printer, "line_delay_ms", self->settings->settings.printer_line_delay_ms);
+    cJSON_AddItemToObject(root, "thermal_printer", thermal_printer);
+
     // OTA settings
     cJSON *ota = cJSON_CreateObject();
     cJSON_AddNumberToObject(ota, "update_channel", self->settings->settings.ota_update_channel);
@@ -836,7 +1019,7 @@ esp_err_t remote_control_send_current_settings(RemoteControl_t *self)
 }
 
 // Constructor
-RemoteControl_t *remote_control_create(SettingsManager_t *settings, HttpClient_t *http_client, LEDRing_t *led_ring, ThermalPrinter_t *printer)
+RemoteControl_t *remote_control_create(SettingsManager_t *settings, HttpClient_t *http_client, LEDRing_t *led_ring, ThermalPrinter_t *printer, WiFi_t *wifi)
 {
     RemoteControl_t *remote_control = malloc(sizeof(RemoteControl_t));
     if (!remote_control)
@@ -860,6 +1043,7 @@ RemoteControl_t *remote_control_create(SettingsManager_t *settings, HttpClient_t
     remote_control->http_client = http_client;
     remote_control->led_ring = led_ring;
     remote_control->printer = printer;
+    remote_control->wifi = wifi;
     remote_control->running = false;
     remote_control->init = remote_control_init_impl;
     remote_control->start_polling = remote_control_start_polling_impl;

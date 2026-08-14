@@ -155,6 +155,15 @@ static void set_default_settings(app_settings_t *settings)
     settings->printer_rts_pin = DEFAULT_PRINTER_RTS_PIN;
     settings->printer_baud_rate = DEFAULT_PRINTER_BAUD_RATE;
     settings->printer_max_width = DEFAULT_PRINTER_MAX_WIDTH;
+    settings->printer_max_heating_dots = DEFAULT_PRINTER_MAX_HEATING_DOTS;
+    settings->printer_heating_time = DEFAULT_PRINTER_HEATING_TIME;
+    settings->printer_heating_interval = DEFAULT_PRINTER_HEATING_INTERVAL;
+    settings->printer_density = DEFAULT_PRINTER_DENSITY;
+    settings->printer_break_time = DEFAULT_PRINTER_BREAK_TIME;
+    settings->printer_bold = DEFAULT_PRINTER_BOLD;
+    settings->printer_double_strike = DEFAULT_PRINTER_DOUBLE_STRIKE;
+    settings->printer_heating_commands = DEFAULT_PRINTER_HEATING_COMMANDS;
+    settings->printer_line_delay_ms = DEFAULT_PRINTER_LINE_DELAY_MS;
 
     settings->self_timer_enabled = DEFAULT_SELF_TIMER_ENABLED;
     settings->flash_enabled = DEFAULT_FLASH_ENABLED;
@@ -231,6 +240,28 @@ static esp_err_t settings_to_json(const app_settings_t *settings, char **json_st
     cJSON_AddBoolToObject(camera_features, "flash_enabled", settings->flash_enabled);
     cJSON_AddBoolToObject(camera_features, "auto_print_enabled", settings->auto_print_enabled);
     cJSON_AddItemToObject(root, "camera_features", camera_features);
+
+    // Thermal printer settings — previously not serialized at all, so saved
+    // settings.json on the device dropped printer fields. Round-trip them
+    // here so heating params (and the rest) survive a save/load cycle.
+    cJSON *printer = cJSON_CreateObject();
+    cJSON_AddBoolToObject(printer, "enabled", settings->printer_enabled);
+    cJSON_AddNumberToObject(printer, "uart_port", settings->printer_uart_port);
+    cJSON_AddNumberToObject(printer, "tx_pin", settings->printer_tx_pin);
+    cJSON_AddNumberToObject(printer, "rx_pin", settings->printer_rx_pin);
+    cJSON_AddNumberToObject(printer, "rts_pin", settings->printer_rts_pin);
+    cJSON_AddNumberToObject(printer, "baud_rate", settings->printer_baud_rate);
+    cJSON_AddNumberToObject(printer, "max_print_width", settings->printer_max_width);
+    cJSON_AddNumberToObject(printer, "max_heating_dots", settings->printer_max_heating_dots);
+    cJSON_AddNumberToObject(printer, "heating_time", settings->printer_heating_time);
+    cJSON_AddNumberToObject(printer, "heating_interval", settings->printer_heating_interval);
+    cJSON_AddNumberToObject(printer, "density", settings->printer_density);
+    cJSON_AddNumberToObject(printer, "break_time", settings->printer_break_time);
+    cJSON_AddBoolToObject(printer, "bold", settings->printer_bold);
+    cJSON_AddBoolToObject(printer, "double_strike", settings->printer_double_strike);
+    cJSON_AddBoolToObject(printer, "heating_commands", settings->printer_heating_commands);
+    cJSON_AddNumberToObject(printer, "line_delay_ms", settings->printer_line_delay_ms);
+    cJSON_AddItemToObject(root, "thermal_printer", printer);
 
     // Poem settings
     cJSON *poem = cJSON_CreateObject();
@@ -385,6 +416,24 @@ static esp_err_t json_to_settings(const char *json_str, app_settings_t *settings
             settings->printer_baud_rate = item->valueint;
         if ((item = cJSON_GetObjectItem(printer, "max_print_width")))
             settings->printer_max_width = item->valueint;
+        if ((item = cJSON_GetObjectItem(printer, "max_heating_dots")))
+            settings->printer_max_heating_dots = item->valueint;
+        if ((item = cJSON_GetObjectItem(printer, "heating_time")))
+            settings->printer_heating_time = item->valueint;
+        if ((item = cJSON_GetObjectItem(printer, "heating_interval")))
+            settings->printer_heating_interval = item->valueint;
+        if ((item = cJSON_GetObjectItem(printer, "density")))
+            settings->printer_density = item->valueint;
+        if ((item = cJSON_GetObjectItem(printer, "break_time")))
+            settings->printer_break_time = item->valueint;
+        if ((item = cJSON_GetObjectItem(printer, "bold")))
+            settings->printer_bold = cJSON_IsTrue(item);
+        if ((item = cJSON_GetObjectItem(printer, "double_strike")))
+            settings->printer_double_strike = cJSON_IsTrue(item);
+        if ((item = cJSON_GetObjectItem(printer, "heating_commands")))
+            settings->printer_heating_commands = cJSON_IsTrue(item);
+        if ((item = cJSON_GetObjectItem(printer, "line_delay_ms")))
+            settings->printer_line_delay_ms = (uint16_t)item->valueint;
     }
 
     // Parse camera features

@@ -31,10 +31,6 @@ static esp_err_t thermal_printer_init_impl(ThermalPrinter_t *self)
     
     esp_err_t err;
     
-    // Delete UART driver if it already exists (cleanup from previous init)
-    uart_driver_delete(self->config.uart_port);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
     // Install UART driver with larger buffers
     err = uart_driver_install(self->config.uart_port, 2048, 2048, 0, NULL, 0);
     if (err != ESP_OK) {
@@ -68,16 +64,16 @@ static esp_err_t thermal_printer_init_impl(ThermalPrinter_t *self)
     uart_flush_input(self->config.uart_port);
     
     // Wait for printer to be ready
-    vTaskDelay(pdMS_TO_TICKS(500)); // Increased wait time
-    
+    vTaskDelay(pdMS_TO_TICKS(250));
+
     // Send printer initialization command
     uint8_t init_cmd[] = {ESC, '@'}; // Initialize printer
     ESP_LOGI(TAG, "Sending ESC @ (init command): 0x%02X 0x%02X", init_cmd[0], init_cmd[1]);
     uart_write_bytes(self->config.uart_port, (const char *)init_cmd, sizeof(init_cmd));
     uart_wait_tx_done(self->config.uart_port, pdMS_TO_TICKS(200));
     
-    vTaskDelay(pdMS_TO_TICKS(500)); // Wait longer for reset to complete
-    
+    vTaskDelay(pdMS_TO_TICKS(250)); // Wait for reset to complete
+
     // Try setting international character set (might help)
     uint8_t intl_cmd[] = {ESC, 'R', 0x00}; // USA
     ESP_LOGI(TAG, "Setting international charset: ESC R 0");
@@ -95,8 +91,33 @@ static esp_err_t thermal_printer_init_impl(ThermalPrinter_t *self)
     vTaskDelay(pdMS_TO_TICKS(200));
     
     self->initialized = true;
+
+    // ESC 7 / DC2 # only when the printer is known to understand them. On a
+    // controller that doesn't, these emit nothing useful and leave their
+    // argument bytes in the line buffer to be printed as junk ahead of the
+    // first real line. See printer_config_t.heating_commands.
+    if (self->config.heating_commands) {
+        self->set_print_density(self,
+                                self->config.max_heating_dots,
+                                self->config.heating_time,
+                                self->config.heating_interval);
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        self->set_density(self, self->config.density, self->config.break_time);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    } else {
+        ESP_LOGI(TAG, "Heating/density commands disabled (printer does not support ESC 7 / DC2 #)");
+    }
+
+    // Applied as a global baseline so all text inherits it, rather than being
+    // toggled per string. Both darken by re-firing dots instead of driving
+    // them harder, so they add print time but no peak current.
+    self->set_bold(self, self->config.bold);
+    self->set_double_strike(self, self->config.double_strike);
+    vTaskDelay(pdMS_TO_TICKS(100));
+
     ESP_LOGI(TAG, "Thermal printer initialized successfully (ready for printing)");
-    
+
     return ESP_OK;
 }
 
@@ -155,9 +176,14 @@ static esp_err_t thermal_printer_print_line_impl(ThermalPrinter_t *self, const c
         ESP_LOGE(TAG, "UART TX timeout: %s", esp_err_to_name(err));
     }
     
-    // Add much longer delay to give printer time to process and print the line
-    vTaskDelay(pdMS_TO_TICKS(500)); // Increased from 400ms to 500ms
-    
+    // Let the printer finish this line — and, on a shared supply, let the rail
+    // recover — before the next one is sent. Read from config on every call so
+    // a live settings push takes effect on the next line, not the next boot.
+    uint16_t delay_ms = self->config.line_delay_ms;
+    if (delay_ms < 100) delay_ms = 100;
+    if (delay_ms > 3000) delay_ms = 3000;
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+
     return ESP_OK;
 }
 
@@ -198,7 +224,30 @@ static esp_err_t thermal_printer_set_bold_impl(ThermalPrinter_t *self, bool enab
     
     uint8_t cmd[] = {ESC, 'E', enabled ? 1 : 0};
     uart_write_bytes(self->config.uart_port, (const char *)cmd, sizeof(cmd));
-    
+
+    // Logged so the boot output shows the darkness baseline, same as the two
+    // density commands — otherwise there's no way to tell from the log whether
+    // bold actually got applied.
+    ESP_LOGI(TAG, "Bold: %s", enabled ? "ON" : "OFF");
+    return ESP_OK;
+}
+
+// Enable/disable double-strike (ESC G)
+static esp_err_t thermal_printer_set_double_strike_impl(ThermalPrinter_t *self, bool enabled)
+{
+    if (!self->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint8_t cmd[] = {ESC, 'G', enabled ? 1 : 0};
+    int written = uart_write_bytes(self->config.uart_port, (const char *)cmd, sizeof(cmd));
+    if (written < 0) {
+        ESP_LOGE(TAG, "Failed to write double-strike command");
+        return ESP_FAIL;
+    }
+    uart_wait_tx_done(self->config.uart_port, pdMS_TO_TICKS(200));
+
+    ESP_LOGI(TAG, "Double-strike: %s", enabled ? "ON" : "OFF");
     return ESP_OK;
 }
 
@@ -219,6 +268,66 @@ static esp_err_t thermal_printer_set_size_impl(ThermalPrinter_t *self, int width
     uint8_t cmd[] = {GS, '!', size};
     uart_write_bytes(self->config.uart_port, (const char *)cmd, sizeof(cmd));
     
+    return ESP_OK;
+}
+
+// Tune heating parameters (ESC 7 n1 n2 n3). The factory default on most cheap
+// 58mm thermal printers is roughly (7, 80, 2), which prints noticeably faint.
+// Bumping heating_time is the primary lever for darkness.
+static esp_err_t thermal_printer_set_print_density_impl(ThermalPrinter_t *self,
+                                                        uint8_t max_heating_dots,
+                                                        uint8_t heating_time,
+                                                        uint8_t heating_interval)
+{
+    if (!self->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint8_t cmd[] = {ESC, '7', max_heating_dots, heating_time, heating_interval};
+    int written = uart_write_bytes(self->config.uart_port, (const char *)cmd, sizeof(cmd));
+    if (written < 0) {
+        ESP_LOGE(TAG, "Failed to write print-density command");
+        return ESP_FAIL;
+    }
+    uart_wait_tx_done(self->config.uart_port, pdMS_TO_TICKS(200));
+
+    ESP_LOGI(TAG, "Set print density: max_dots=%u, heating_time=%u (%uµs), interval=%u (%uµs)",
+             max_heating_dots, heating_time, heating_time * 10,
+             heating_interval, heating_interval * 10);
+    return ESP_OK;
+}
+
+// Set printing density (DC2 #). Packs density into bits 0-4 and break time
+// into bits 5-7 of a single byte.
+static esp_err_t thermal_printer_set_density_impl(ThermalPrinter_t *self,
+                                                  uint8_t density,
+                                                  uint8_t break_time)
+{
+    if (!self->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Clamp to the field widths so an out-of-range setting can't corrupt the
+    // neighbouring bits and silently set a wildly wrong density.
+    if (density > 31) {
+        ESP_LOGW(TAG, "density %u out of range (0-31), clamping to 31", density);
+        density = 31;
+    }
+    if (break_time > 7) {
+        ESP_LOGW(TAG, "break_time %u out of range (0-7), clamping to 7", break_time);
+        break_time = 7;
+    }
+
+    uint8_t cmd[] = {0x12, '#', (uint8_t)((break_time << 5) | density)};
+    int written = uart_write_bytes(self->config.uart_port, (const char *)cmd, sizeof(cmd));
+    if (written < 0) {
+        ESP_LOGE(TAG, "Failed to write DC2 # density command");
+        return ESP_FAIL;
+    }
+    uart_wait_tx_done(self->config.uart_port, pdMS_TO_TICKS(200));
+
+    ESP_LOGI(TAG, "Set density: density=%u (%u%%), break_time=%u (%uµs), byte=0x%02X",
+             density, 50 + 5 * density, break_time, break_time * 250, cmd[2]);
     return ESP_OK;
 }
 
@@ -274,6 +383,9 @@ ThermalPrinter_t *thermal_printer_create(printer_config_t config)
     printer->set_bold = thermal_printer_set_bold_impl;
     printer->set_size = thermal_printer_set_size_impl;
     printer->cut_paper = thermal_printer_cut_paper_impl;
+    printer->set_print_density = thermal_printer_set_print_density_impl;
+    printer->set_density = thermal_printer_set_density_impl;
+    printer->set_double_strike = thermal_printer_set_double_strike_impl;
     printer->destroy = thermal_printer_destroy_impl;
     
     return printer;
@@ -287,156 +399,177 @@ void thermal_printer_destroy(ThermalPrinter_t *printer)
     }
 }
 
-// Helper function to wrap text to max width (word wrapping)
+// Wrap one line of text to max_width and print it.
+//
+// Every character of `text` is printed. Words are broken at spaces where a
+// space is available, and mid-word when one is not: a run longer than the line
+// width (a phone number spelled out in hyphenated words, say) used to be
+// truncated to the width with the remainder silently discarded. The only
+// characters not carried over to the next line are the spaces at a break
+// point, which would otherwise print as a ragged left edge.
 static void print_wrapped_line(ThermalPrinter_t *printer, const char *text, int max_width)
 {
-    if (!text || strlen(text) == 0) {
+    if (!text) {
         printer->print_line(printer, "");
         return;
     }
-    
+
+    if (max_width < 1) {
+        max_width = 1;
+    }
+
     ESP_LOGI(TAG, "Word-wrapping line (max_width=%d): '%s'", max_width, text);
-    
+
     // Count leading spaces for indentation
-    int leading_spaces = 0;
-    while (text[leading_spaces] == ' ' && leading_spaces < strlen(text)) {
-        leading_spaces++;
+    size_t raw_leading = 0;
+    while (text[raw_leading] == ' ') {
+        raw_leading++;
     }
-    
+
     // For thermal printer, reduce indentation by half and limit to max 8 spaces
-    leading_spaces = leading_spaces / 2;
-    if (leading_spaces > 8) {
-        leading_spaces = 8;
+    int first_indent = (int)(raw_leading / 2);
+    if (first_indent > 8) {
+        first_indent = 8;
     }
-    
+
     // Get the actual text content (skip leading spaces)
-    const char *content = text;
-    while (*content == ' ' && *content != '\0') {
-        content++;
-    }
-    
-    // If the line with limited indentation fits, print it directly
-    if (leading_spaces + strlen(content) <= max_width) {
-        char indented_line[max_width + 1];
-        int i;
-        for (i = 0; i < leading_spaces; i++) {
-            indented_line[i] = ' ';
-        }
-        strncpy(indented_line + leading_spaces, content, max_width - leading_spaces);
-        indented_line[max_width] = '\0';
-        printer->print_line(printer, indented_line);
+    const char *content = text + raw_leading;
+    size_t len = strlen(content);
+
+    if (len == 0) {
+        printer->print_line(printer, "");
         return;
     }
-    
-    // Need to wrap - split at word boundaries, preserving initial indentation
-    char *text_copy = strdup(content);
-    if (!text_copy) {
-        ESP_LOGE(TAG, "Failed to strdup in print_wrapped_line, printing as-is");
-        printer->print_line(printer, text); // Fallback
-        return;
+
+    // Wrapped remainder sits two columns in from the line's own indent, so a
+    // run-on reads as a continuation rather than as a new verse line.
+    int cont_indent = first_indent + 2;
+    if (cont_indent > max_width - 5) {
+        cont_indent = (max_width > 5) ? 2 : 0;
     }
-    
-    char buffer[max_width + 1];
-    int pos = 0;
-    bool is_first_line = true;
-    char *saveptr = NULL;  // Use reentrant strtok_r instead of strtok
-    char *word = strtok_r(text_copy, " ", &saveptr);
-    
-    while (word) {
-        int word_len = strlen(word);
-        
-        // If adding this word exceeds max width, print current buffer and start new line
-        if (pos > 0 && pos + word_len + 1 > max_width) {
-            buffer[pos] = '\0';
-            printer->print_line(printer, buffer);
-            pos = 0;
-            is_first_line = false;
+
+    char line[max_width + 1];
+    size_t i = 0;
+    bool first = true;
+
+    while (i < len) {
+        int indent = first ? first_indent : cont_indent;
+        if (indent > max_width - 1) {
+            indent = 0;
         }
-        
-        // Add indentation for first line or continuation indent
-        if (pos == 0) {
-            if (is_first_line) {
-                // Add original indentation to first line
-                for (int i = 0; i < leading_spaces && i < max_width; i++) {
-                    buffer[pos++] = ' ';
-                }
-            } else {
-                // Add continuation indent (2 spaces beyond original indent)
-                int continuation_indent = leading_spaces + 2;
-                if (continuation_indent > max_width - 5) {
-                    continuation_indent = (max_width > 5) ? 2 : 0;
-                }
-                for (int i = 0; i < continuation_indent && i < max_width; i++) {
-                    buffer[pos++] = ' ';
+        int avail = max_width - indent;
+        if (avail < 1) {
+            indent = 0;
+            avail = max_width;
+        }
+
+        size_t remaining = len - i;
+        size_t take;
+
+        if (remaining <= (size_t)avail) {
+            take = remaining;
+        } else {
+            // Last space that lets this line break cleanly. Index `avail` is a
+            // legal break point too — that space falls just off the end.
+            size_t brk = 0;
+            for (size_t j = (size_t)avail; j > 0; j--) {
+                if (content[i + j] == ' ') {
+                    brk = j;
+                    break;
                 }
             }
+            // No space to break on: fill the line and continue mid-word on the
+            // next one rather than dropping the tail.
+            take = (brk > 0) ? brk : (size_t)avail;
         }
-        
-        // Add word to buffer
-        if (pos > 0 && buffer[pos-1] != ' ' && pos < max_width) {
-            buffer[pos++] = ' '; // Add space before word
+
+        memset(line, ' ', (size_t)indent);
+        memcpy(line + indent, content + i, take);
+        line[indent + take] = '\0';
+
+        // Trailing spaces carry no ink but do shift where a centred line sits.
+        for (int k = indent + (int)take - 1; k >= 0 && line[k] == ' '; k--) {
+            line[k] = '\0';
         }
-        
-        // Copy word to buffer (with bounds checking)
-        int chars_to_copy = word_len;
-        if (pos + chars_to_copy >= max_width) {
-            chars_to_copy = max_width - pos - 1;
+
+        printer->print_line(printer, line);
+
+        i += take;
+        // Consume the run of spaces we broke on — and nothing else.
+        while (i < len && content[i] == ' ') {
+            i++;
         }
-        if (chars_to_copy > 0) {
-            strncpy(buffer + pos, word, chars_to_copy);
-            pos += chars_to_copy;
-        }
-        
-        word = strtok_r(NULL, " ", &saveptr);
+        first = false;
     }
-    
-    // Print remaining text in buffer
-    if (pos > 0) {
-        buffer[pos] = '\0';
-        printer->print_line(printer, buffer);
+}
+
+// Tile a repeating unit out to exactly `width` characters and print it.
+//
+// Borders are generated rather than written out as fixed-length literals so
+// they track max_print_width: narrowing the line narrows the frame with the
+// poem body instead of leaving a border wider than the text it frames.
+static void print_tiled_line(ThermalPrinter_t *printer, const char *unit, int width)
+{
+    if (!unit || !*unit || width <= 0) {
+        return;
     }
-    
-    free(text_copy);
+
+    size_t unit_len = strlen(unit);
+    char line[width + 1];
+    for (int i = 0; i < width; i++) {
+        line[i] = unit[i % unit_len];
+    }
+    line[width] = '\0';
+
+    // Trailing spaces carry no ink but do shift where the printer centres the
+    // line, so a pattern whose unit ends in spaces would sit off to the left.
+    for (int i = width - 1; i >= 0 && line[i] == ' '; i--) {
+        line[i] = '\0';
+    }
+
+    printer->print_line(printer, line);
 }
 
 // Get a random decorative line for poem borders
 static void print_random_decorative_border(ThermalPrinter_t *printer) {
+    const int width = printer->config.max_print_width;
+
     // 10 different decorative line options (some multi-line)
     int pattern = rand() % 10;
-    
+
     switch(pattern) {
         case 0: // Original stars
-            printer->print_line(printer, "~*~*~*~*~*~*~*~*~*~*~*~*~*~*");
+            print_tiled_line(printer, "~*", width);
             break;
         case 1: // Dashes and equals
-            printer->print_line(printer, "-=-=-=-=-=-=-=-=-=-=-=-=-=-=");
+            print_tiled_line(printer, "-=", width);
             break;
         case 2: // Simple dots
-            printer->print_line(printer, "................................");
+            print_tiled_line(printer, ".", width);
             break;
         case 3: // Hash marks
-            printer->print_line(printer, "################################");
+            print_tiled_line(printer, "#", width);
             break;
         case 4: // Double lines
-            printer->print_line(printer, "================================");
+            print_tiled_line(printer, "=", width);
             break;
         case 5: // Asterisks
-            printer->print_line(printer, "********************************");
+            print_tiled_line(printer, "*", width);
             break;
         case 6: // Plus signs
-            printer->print_line(printer, "++++++++++++++++++++++++++++++++");
+            print_tiled_line(printer, "+", width);
             break;
         case 7: // Chevrons pattern (multi-line)
-            printer->print_line(printer, "   `     `     `     `     `");
-            printer->print_line(printer, "  ' . ' ' . ' ' . ' ' . ' ' .");
-            printer->print_line(printer, "   `     `     `     `     `");
+            print_tiled_line(printer, "  `   ", width);
+            print_tiled_line(printer, "' . ' ", width);
+            print_tiled_line(printer, "  `   ", width);
             break;
         case 8: // Vertical bars
-            printer->print_line(printer, "||||||||||||||||||||||||||||||||");
+            print_tiled_line(printer, "|", width);
             break;
         case 9: // Wave pattern (multi-line)
-            printer->print_line(printer, " .  '  .  '  .  '  .  '  .  '");
-            printer->print_line(printer, "'  .  '  .  '  .  '  .  '  .");
+            print_tiled_line(printer, " .  ' ", width);
+            print_tiled_line(printer, "'  .  ", width);
             break;
     }
 }
@@ -474,8 +607,12 @@ esp_err_t thermal_printer_print_poem(ThermalPrinter_t *printer,
     if (title && strlen(title) > 0) {
         printer->set_bold(printer, true);
         printer->set_size(printer, 1, 1);
-        printer->print_line(printer, title);
-        printer->set_bold(printer, false);
+        // Wrapped like the body: unwrapped, a long title would run on to the
+        // head's own 32-character limit and overhang the poem below it.
+        print_wrapped_line(printer, title, printer->config.max_print_width);
+        // Restore the configured baseline, not hard-off — otherwise the title
+        // would silently disable bold for the whole body below it.
+        printer->set_bold(printer, printer->config.bold);
         printer->feed_lines(printer, 1);
     }
     
@@ -506,7 +643,7 @@ esp_err_t thermal_printer_print_poem(ThermalPrinter_t *printer,
                     *current = '\0';
                     line_count++;
                     ESP_LOGI(TAG, "Printing poem line %d: '%s'", line_count, line_start);
-                    // Use word wrapping for each line (max 32 chars per line)
+                    // Use word wrapping for each line (max_print_width chars)
                     print_wrapped_line(printer, line_start, printer->config.max_print_width);
                     current++;
                     line_start = current;

@@ -31,7 +31,16 @@
     "rx_pin": 42,
     "rts_pin": 2,
     "baud_rate": 9600,
-    "max_print_width": 32
+    "max_print_width": 24,
+    "max_heating_dots": 9,
+    "heating_time": 120,
+    "heating_interval": 100,
+    "density": 10,
+    "break_time": 3,
+    "bold": true,
+    "double_strike": true,
+    "heating_commands": false,
+    "line_delay_ms": 1500
   },
   "system": {
     "device_name": "ESP32-Camera",

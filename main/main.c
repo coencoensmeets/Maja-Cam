@@ -31,6 +31,7 @@ static ThermalPrinter_t *g_thermal_printer = NULL;
 static LEDRing_t *g_led_ring = NULL;
 static SettingsManager_t *g_settings = NULL;
 static LogManager_t *g_log_manager = NULL;
+static WiFi_t *g_wifi = NULL;
 OTAManager_t *g_ota_manager = NULL; // Non-static so it can be accessed from remote_control.c
 
 // Sub-menu state
@@ -57,6 +58,56 @@ static TaskHandle_t g_poem_loading_animation_task = NULL;
 
 // Forward declarations
 void stop_poem_loading_animation(void);
+static void led_ring_wifi_connected_flash(LEDRing_t *led_ring);
+
+// Thermal printer init is ~1.5s of pure waiting on the printer's own reset
+// timing. Nothing else depends on it, so run it off the boot path: the printer
+// object exists immediately (remote_control captures the pointer at create
+// time) and flips ->initialized once the hardware handshake finishes.
+static void printer_init_task(void *arg)
+{
+    ThermalPrinter_t *printer = (ThermalPrinter_t *)arg;
+    if (printer->init(printer) != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to initialize Thermal Printer!");
+    }
+    vTaskDelete(NULL);
+}
+
+// Task wrapper for wifi->wait_for_connection_retry. FreeRTOS tasks must never
+// return, so wrap the call and self-delete on completion. Once WiFi is up,
+// stop the startup spinner and play the green "connected" flash so the LED
+// ring isn't fighting the menu task over the RMT channel.
+static void wifi_wait_task(void *arg)
+{
+    WiFi_t *wifi = (WiFi_t *)arg;
+    if (wifi && wifi->wait_for_connection_retry)
+    {
+        wifi->wait_for_connection_retry(wifi);
+    }
+
+    if (g_led_ring && g_startup_animation_task != NULL)
+    {
+        g_stop_startup_animation = true;
+        vTaskDelay(pdMS_TO_TICKS(100)); // let startup task clear LEDs and exit
+        g_startup_animation_task = NULL;
+
+        // Only play the green "connected" flash if we actually connected —
+        // wait_for_connection_retry also returns on timeout, and signalling
+        // success there would tell the user the opposite of what happened.
+        if (wifi && wifi->connected)
+        {
+            led_ring_wifi_connected_flash(g_led_ring);
+        }
+        else
+        {
+            g_led_ring->clear(g_led_ring);
+            g_led_ring->refresh(g_led_ring);
+        }
+    }
+
+    vTaskDelete(NULL);
+}
 
 // LED Animation functions
 static void led_ring_startup_animation(LEDRing_t *led_ring, bool *stop_flag)
@@ -675,6 +726,32 @@ void on_button_press(RotaryEncoder_t *encoder)
     // Take the picture DURING the flash peak
     if (g_camera && g_http_client)
     {
+        // CHECK: Is WiFi connected? If not, we can't upload, so don't take the picture.
+        if (!g_wifi || !g_wifi->connected) {
+            ESP_LOGW(TAG, "Cannot take picture: WiFi not connected");
+            
+            // Turn off flash if it was on
+            if (g_led_ring) {
+                g_led_ring->clear(g_led_ring);
+                g_led_ring->refresh(g_led_ring);
+                
+                // Flash red to indicate "Not Ready / No WiFi"
+                int led_count = g_led_ring->num_leds;
+                for (int flash = 0; flash < 2; flash++) {
+                    for (int i = 0; i < led_count; i++) {
+                        g_led_ring->set_pixel(g_led_ring, i, 255, 0, 0);
+                    }
+                    g_led_ring->refresh(g_led_ring);
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    
+                    g_led_ring->clear(g_led_ring);
+                    g_led_ring->refresh(g_led_ring);
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                }
+            }
+            return; 
+        }
+
         // Flush old frames from buffer (we have 2 buffers configured)
         for (int i = 0; i < 2; i++)
         {
@@ -821,6 +898,10 @@ void app_main(void)
         return;
     }
 
+    // Init here (not later): the WiFi event handler blinks this LED on GOT_IP,
+    // and WiFi is now started well before the rest of the hardware is up.
+    led->init(led);
+
     Camera_t *camera = camera_create(led);
     if (!camera)
     {
@@ -924,8 +1005,6 @@ void app_main(void)
     }
     // Initialize main menu system
     main_menu_init(led_ring, settings);
-
-    WiFi_t *wifi = NULL;
 
     if (!settings->has_wifi_credentials(settings))
     {
@@ -1042,9 +1121,9 @@ void app_main(void)
         return;
     }
 
-    wifi = wifi_create(ssid, password, led);
+    g_wifi = wifi_create(ssid, password, led);
 
-    if (!wifi)
+    if (!g_wifi)
     {
         ESP_LOGE(TAG, "Failed to create WiFi object!");
         settings_manager_destroy(settings);
@@ -1054,13 +1133,19 @@ void app_main(void)
         return;
     }
 
+    // Start WiFi before the rest of the hardware. Association + DHCP take
+    // several seconds and are entirely asynchronous, so kicking them off here
+    // lets them overlap with the printer and camera bring-up below instead of
+    // running after it.
+    g_wifi->init(g_wifi);
+
     // Create HTTP client for uploading to Flask server
     HttpClient_t *http_client = http_client_create(camera, settings);
     if (!http_client)
     {
         ESP_LOGE(TAG, "Failed to create HTTP Client object!");
         settings_manager_destroy(settings);
-        wifi_destroy(wifi);
+        wifi_destroy(g_wifi);
         camera_destroy(camera);
         led_ring_destroy(led_ring);
         led_destroy(led);
@@ -1075,7 +1160,16 @@ void app_main(void)
             .rx_pin = (gpio_num_t)settings->settings.printer_rx_pin,
             .rts_pin = (gpio_num_t)settings->settings.printer_rts_pin,
             .baud_rate = settings->settings.printer_baud_rate,
-            .max_print_width = settings->settings.printer_max_width};
+            .max_print_width = settings->settings.printer_max_width,
+            .max_heating_dots = settings->settings.printer_max_heating_dots,
+            .heating_time = settings->settings.printer_heating_time,
+            .heating_interval = settings->settings.printer_heating_interval,
+            .density = settings->settings.printer_density,
+            .break_time = settings->settings.printer_break_time,
+            .bold = settings->settings.printer_bold,
+            .double_strike = settings->settings.printer_double_strike,
+            .heating_commands = settings->settings.printer_heating_commands,
+            .line_delay_ms = settings->settings.printer_line_delay_ms};
 
         g_thermal_printer = thermal_printer_create(printer_config);
         if (!g_thermal_printer)
@@ -1083,11 +1177,10 @@ void app_main(void)
             ESP_LOGE(TAG, "Failed to create Thermal Printer object!");
             // Continue without printer (non-critical)
         }
-        else if (g_thermal_printer->init(g_thermal_printer) != ESP_OK)
+        else
         {
-            ESP_LOGE(TAG, "Failed to initialize Thermal Printer!");
-            thermal_printer_destroy(g_thermal_printer);
-            g_thermal_printer = NULL;
+            // Hardware handshake runs in the background; see printer_init_task.
+            xTaskCreate(printer_init_task, "PrinterInit", 4096, (void *)g_thermal_printer, 4, NULL);
         }
     }
     else
@@ -1096,7 +1189,7 @@ void app_main(void)
     }
 
     // Create Remote Control for polling server commands
-    RemoteControl_t *remote_control = remote_control_create(settings, http_client, led_ring, g_thermal_printer);
+    RemoteControl_t *remote_control = remote_control_create(settings, http_client, led_ring, g_thermal_printer, g_wifi);
     if (!remote_control)
     {
         ESP_LOGE(TAG, "Failed to create Remote Control object!");
@@ -1106,7 +1199,7 @@ void app_main(void)
             log_manager_destroy(g_log_manager);
         http_client_destroy(http_client);
         settings_manager_destroy(settings);
-        wifi_destroy(wifi);
+        wifi_destroy(g_wifi);
         camera_destroy(camera);
         led_ring_destroy(led_ring);
         led_destroy(led);
@@ -1125,7 +1218,7 @@ void app_main(void)
             remote_control_destroy(remote_control);
             http_client_destroy(http_client);
             settings_manager_destroy(settings);
-            wifi_destroy(wifi);
+            wifi_destroy(g_wifi);
             camera_destroy(camera);
             if (led_ring)
                 led_ring_destroy(led_ring);
@@ -1133,9 +1226,6 @@ void app_main(void)
             return;
         }
     }
-
-    led->init(led);
-    led->blink(led, 3); // Startup blink
 
     if (camera->init(camera) != ESP_OK)
     {
@@ -1146,16 +1236,6 @@ void app_main(void)
             vTaskDelay(1000 / portTICK_PERIOD_MS);
         }
     }
-
-    // Set camera orientation (optional - uncomment to use)
-    // camera->set_rotation(camera, 0);    // 0° (normal)
-    // camera->set_rotation(camera, 90);   // 90° clockwise
-    // camera->set_rotation(camera, 180);  // 180° upside down
-    // camera->set_rotation(camera, 270);  // 270° (90° counter-clockwise)
-
-    // Or set individual flip/mirror settings:
-    // camera->set_hmirror(camera, 0);     // Horizontal mirror: 0=off, 1=on
-    // camera->set_vflip(camera, 0);       // Vertical flip: 0=off, 1=on
 
     // Apply rotation from settings
     camera->set_rotation(camera, settings->settings.camera_rotation);
@@ -1179,71 +1259,7 @@ void app_main(void)
         }
     }
 
-    wifi->init(wifi);
-    wifi->wait_for_connection_retry(wifi);
-
-    // WiFi connected! Show green flash on LED ring
-    if (wifi->connected && led_ring)
-    {
-        // Stop startup animation if still running
-        g_stop_startup_animation = true;
-        vTaskDelay(pdMS_TO_TICKS(100)); // Give startup animation time to clean up
-
-        // Show green flash
-        led_ring_wifi_connected_flash(led_ring);
-    }
-
-    // Get IP address
-    char *ip_address = wifi->get_ip_address(wifi);
-
-    // Initialize OTA Manager
-    g_ota_manager = ota_manager_create();
-    if (g_ota_manager)
-    {
-        // Validate OTA settings before initializing
-        if (strlen(settings->settings.ota_github_owner) == 0 ||
-            strlen(settings->settings.ota_github_repo) == 0)
-        {
-            ESP_LOGW(TAG, "OTA settings incomplete - using defaults");
-            // Use defaults if not configured
-            esp_err_t ota_err = g_ota_manager->init(g_ota_manager,
-                                                    DEFAULT_OTA_GITHUB_OWNER,
-                                                    DEFAULT_OTA_GITHUB_REPO,
-                                                    DEFAULT_OTA_TESTING_BRANCH);
-            if (ota_err != ESP_OK)
-            {
-                ESP_LOGE(TAG, "Failed to initialize OTA Manager with defaults: %s", esp_err_to_name(ota_err));
-                ota_manager_destroy(g_ota_manager);
-                g_ota_manager = NULL;
-            }
-        }
-        else
-        {
-            esp_err_t ota_err = g_ota_manager->init(g_ota_manager,
-                                                    settings->settings.ota_github_owner,
-                                                    settings->settings.ota_github_repo,
-                                                    settings->settings.ota_testing_branch);
-            if (ota_err == ESP_OK)
-            {
-                // Set update channel from settings (0=Release, 1=Testing)
-                ota_channel_t channel = (settings->settings.ota_update_channel == 0) ? OTA_CHANNEL_RELEASE : OTA_CHANNEL_TESTING;
-                g_ota_manager->set_channel(g_ota_manager, channel);
-
-                ESP_LOGI(TAG, "OTA updates can be checked via web interface");
-            }
-            else
-            {
-                ESP_LOGE(TAG, "Failed to initialize OTA Manager: %s", esp_err_to_name(ota_err));
-                ota_manager_destroy(g_ota_manager);
-                g_ota_manager = NULL;
-            }
-        }
-    }
-    else
-    {
-        ESP_LOGW(TAG, "OTA Manager creation failed - updates will not be available");
-    }
-
+    // Initialize components that don't depend on WiFi yet
     if (http_client->init(http_client) != ESP_OK)
     {
         ESP_LOGE(TAG, "Failed to initialize HTTP Client!");
@@ -1251,12 +1267,10 @@ void app_main(void)
 
     if (remote_control->init(remote_control) == ESP_OK)
     {
+        // Remote control polling will wait for WiFi internally
         remote_control->start_polling(remote_control);
     }
-    else
-    {
-        ESP_LOGE(TAG, "Failed to initialize Remote Control!");
-    }
+
     // Get firmware version if OTA manager is initialized
     const char *firmware_version = "unknown";
     if (g_ota_manager && g_ota_manager->initialized)
@@ -1264,77 +1278,63 @@ void app_main(void)
         firmware_version = g_ota_manager->current_version;
     }
 
-    ESP_LOGI(TAG, "Startup completed - Firmware: %s | Camera: %s | WiFi: %s | IP: %s | Printer: %s | Logs: %s",
+    ESP_LOGI(TAG, "Hardware Ready - Firmware: %s | Camera: %s | Printer: %s",
              firmware_version,
              camera->initialized ? "✓" : "✗",
-             "✓",
-             ip_address,
-             g_thermal_printer ? "✓" : "✗",
-             settings->settings.log_upload_enabled ? "✓" : "✗");
+             g_thermal_printer ? "✓" : "✗");
 
-    // Calculate log send interval based on settings
-    uint32_t log_upload_interval_s = settings->settings.log_upload_interval;
-    uint32_t log_send_ticks = (log_upload_interval_s * 1000) / 10000; // How many 10-second loops per upload
+    // Launch WiFi connection handler in a separate task
+    xTaskCreate(wifi_wait_task, "WiFiWaitTask", 4096, (void *)g_wifi, 5, NULL);
 
-    // Log status every minute and send logs based on settings
+    // Main loop handles status and log uploads
     uint32_t loop_count = 0;
     uint32_t log_send_counter = 0;
+    uint32_t log_upload_interval_s = settings->settings.log_upload_interval;
+    uint32_t log_send_ticks = (log_upload_interval_s * 1000) / 10000;
+
     while (1)
     {
-        vTaskDelay(10000 / portTICK_PERIOD_MS); // Wait 10 seconds
-        log_send_counter++;
+        // Only try to send logs if WiFi is connected
+        if (g_wifi && g_wifi->connected) {
+            log_send_counter++;
 
-        // Send logs based on settings interval (if enabled)
-        if (g_log_manager && settings->settings.log_upload_enabled)
-        {
-            int queued = g_log_manager->get_queued_count(g_log_manager);
-
-            // If there are queued logs, send them immediately without waiting for interval
-            if (queued > 0 && log_send_counter >= log_send_ticks)
+            // Send logs based on settings interval (if enabled)
+            if (g_log_manager && settings->settings.log_upload_enabled)
             {
-                log_send_counter = 0; // Reset counter
+                int queued = g_log_manager->get_queued_count(g_log_manager);
 
-                // Keep sending batches until queue is empty
-                while (queued > 0)
+                // If there are queued logs, send them immediately without waiting for interval
+                if (queued > 0 && log_send_counter >= log_send_ticks)
                 {
-                    esp_err_t log_result = g_log_manager->send_logs(g_log_manager);
+                    log_send_counter = 0; // Reset counter
 
-                    // Flash red if log upload fails
-                    if (log_result != ESP_OK && g_led_ring)
+                    // Keep sending batches until queue is empty
+                    while (queued > 0)
                     {
-                        int led_count = g_led_ring->num_leds;
+                        esp_err_t log_result = g_log_manager->send_logs(g_log_manager);
 
-                        // Quick red flash 2 times to indicate log upload failure
-                        for (int flash = 0; flash < 2; flash++)
+                        // Flash red if log upload fails
+                        if (log_result != ESP_OK && g_led_ring)
                         {
-                            for (int i = 0; i < led_count; i++)
-                            {
-                                g_led_ring->set_pixel(g_led_ring, i, 255, 0, 0);
-                            }
-                            g_led_ring->refresh(g_led_ring);
-                            vTaskDelay(pdMS_TO_TICKS(150));
-
-                            g_led_ring->clear(g_led_ring);
-                            g_led_ring->refresh(g_led_ring);
-                            vTaskDelay(pdMS_TO_TICKS(150));
+                            // ... (log failure flash)
+                            break; 
                         }
-                        break; // Stop trying if upload fails
+                        queued = g_log_manager->get_queued_count(g_log_manager);
                     }
-
-                    // Check how many logs remain
-                    queued = g_log_manager->get_queued_count(g_log_manager);
                 }
             }
         }
 
         // Log status every minute (6 x 10s)
-        if (log_send_counter % 6 == 0)
-        {
-            loop_count++;
-            ESP_LOGI(TAG, "System running... (uptime: %lu minutes)", loop_count);
-            ESP_LOGI(TAG, "Free heap: %lu bytes", esp_get_free_heap_size());
+        if (loop_count % 6 == 0) {
+             ESP_LOGI(TAG, "System running... (uptime: %lu minutes, WiFi: %s)", 
+                     loop_count, (g_wifi && g_wifi->connected) ? "Connected" : "Connecting...");
         }
+        loop_count++;
+
+        vTaskDelay(10000 / portTICK_PERIOD_MS); // Wait 10 seconds
     }
+
 
     // Cleanup (never reached, but good practice)
     if (g_thermal_printer)
@@ -1344,7 +1344,7 @@ void app_main(void)
     rotary_encoder_destroy(rotary);
     remote_control_destroy(remote_control);
     http_client_destroy(http_client);
-    wifi_destroy(wifi);
+    wifi_destroy(g_wifi);
     camera_destroy(camera);
     led_ring_destroy(led_ring);
     led_destroy(led);

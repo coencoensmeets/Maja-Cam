@@ -66,7 +66,10 @@ static esp_err_t wifi_init_impl(WiFi_t *self)
     wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
     wifi_config.sta.pmf_cfg.capable = true;
     wifi_config.sta.pmf_cfg.required = false;
-    wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    // Fast scan stops at the first AP matching the SSID instead of sweeping all
+    // 13 channels first, which cut ~2s off association. Trade-off: with several
+    // APs on one SSID (mesh/extender) we no longer always land on the strongest.
+    wifi_config.sta.scan_method = WIFI_FAST_SCAN;
     wifi_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
@@ -107,11 +110,15 @@ static bool wifi_wait_for_connection_impl(WiFi_t *self, uint32_t timeout_ms)
 static void wifi_wait_for_connection_retry_impl(WiFi_t *self)
 {
     ESP_LOGI(TAG, "Waiting for WiFi connection (will retry indefinitely)...");
-    ESP_LOGI(TAG, "Board will restart if no connection within 20 seconds");
+    ESP_LOGI(TAG, "Will restart to recover if not connected within 20 seconds");
 
     uint32_t elapsed_ms = 0;
     const uint32_t check_interval_ms = 100;     // Check every 100ms to detect button presses
-    const uint32_t restart_timeout_ms = 20000;  // Restart after 20 seconds
+    // The device is useless without the server, so we never fall through to an
+    // offline mode. Observed failure mode is association succeeding but DHCP
+    // never completing, which in-place retrying does not recover from — only a
+    // restart does. Keep this short so a failed boot recycles quickly.
+    const uint32_t restart_timeout_ms = 20000;
     const uint32_t button_reset_hold_ms = 3000; // Hold reset button 3s to clear WiFi creds
     uint32_t button_hold_ms = 0;
 
@@ -142,12 +149,11 @@ static void wifi_wait_for_connection_retry_impl(WiFi_t *self)
             button_hold_ms = 0;
         }
 
-        // Check if we've exceeded the restart timeout
         if (elapsed_ms >= restart_timeout_ms)
         {
-            uint32_t seconds_elapsed = elapsed_ms / 1000;
-            ESP_LOGW(TAG, "WiFi connection failed after %lu seconds, continuing offline...", seconds_elapsed);
-            break; // Stop blocking, continue offline so main app can run
+            ESP_LOGE(TAG, "No WiFi after %lu seconds - restarting to recover", elapsed_ms / 1000);
+            vTaskDelay(500 / portTICK_PERIOD_MS); // let the log drain
+            esp_restart();
         }
 
         // Log status every 5 seconds
@@ -156,11 +162,13 @@ static void wifi_wait_for_connection_retry_impl(WiFi_t *self)
             uint32_t seconds_elapsed = elapsed_ms / 1000;
             ESP_LOGW(TAG, "Still waiting for WiFi connection... (%lu seconds elapsed)", seconds_elapsed);
             ESP_LOGI(TAG, "SSID: %s", self->ssid);
-            ESP_LOGW(TAG, "Will restart in %lu seconds if not connected", (restart_timeout_ms - elapsed_ms) / 1000);
+            ESP_LOGW(TAG, "Will restart in %lu seconds if still not connected", (restart_timeout_ms - elapsed_ms) / 1000);
             self->status_led->blink(self->status_led, 2);
         }
     }
 
+    // Only reachable via the loop condition, i.e. actually connected — the
+    // other two exits (button reset, restart timeout) never return.
     ESP_LOGI(TAG, "WiFi connected successfully after %lu seconds!", elapsed_ms / 1000);
 }
 

@@ -60,6 +60,22 @@ typedef struct
     int8_t printer_rts_pin;       // RTS pin (GPIO number, -1 if not used)
     uint32_t printer_baud_rate;   // Baud rate (typically 9600)
     uint8_t printer_max_width;    // Maximum characters per line
+    // ESC 7 heating parameters — primary lever for print darkness.
+    uint8_t printer_max_heating_dots; // 0-255; heated dots = 8 × (n+1)
+    uint8_t printer_heating_time;     // 3-255; units of 10µs
+    uint8_t printer_heating_interval; // 0-255; units of 10µs
+    // DC2 # density — separate control from ESC 7, often the stronger one.
+    uint8_t printer_density;          // 0-31; darkness = 50% + 5% × n
+    uint8_t printer_break_time;       // 0-7; units of 250µs
+    // Extra-pass darkening — costs time, not peak current.
+    bool printer_bold;                // ESC E emphasized
+    bool printer_double_strike;       // ESC G second pass per line
+    // Whether the printer understands ESC 7 / DC2 #. Off for EM205-class
+    // controllers, which print the argument bytes instead of acting on them.
+    bool printer_heating_commands;
+    // Pause after each printed line, ms (100-3000). Firmware-side, so it works
+    // no matter what the controller supports.
+    uint16_t printer_line_delay_ms;
 
     // Camera feature settings
     bool self_timer_enabled;      // Enable/disable 5-second self-timer countdown
@@ -179,7 +195,30 @@ void settings_manager_destroy(SettingsManager_t *manager);
 #define DEFAULT_PRINTER_RX_PIN 42         // Corrected: RX on GPIO 42 (matches settings.json)
 #define DEFAULT_PRINTER_RTS_PIN 2
 #define DEFAULT_PRINTER_BAUD_RATE 9600
-#define DEFAULT_PRINTER_MAX_WIDTH 32
+// Below the head's 32-character capacity at font A, for a margin either side
+// of the poem rather than edge-to-edge text.
+#define DEFAULT_PRINTER_MAX_WIDTH 24
+// ESC 7 heating parameters. Values confirmed good on the actual hardware
+// rather than derived from a reference design: 9 -> 80 dots fired at once,
+// 1200µs heating, 1000µs recovery between dot groups.
+#define DEFAULT_PRINTER_MAX_HEATING_DOTS 9
+#define DEFAULT_PRINTER_HEATING_TIME 120
+#define DEFAULT_PRINTER_HEATING_INTERVAL 100
+// DC2 # density. 10 = 100% darkness, 3 = 750µs break between lines.
+#define DEFAULT_PRINTER_DENSITY 10
+#define DEFAULT_PRINTER_BREAK_TIME 3
+// On by default: these darken without raising peak current, which is the only
+// headroom available when the printer shares a supply.
+#define DEFAULT_PRINTER_BOLD true
+#define DEFAULT_PRINTER_DOUBLE_STRIKE true
+// Off: at least one of ESC 7 / DC2 # is echoed as text by this printer rather
+// than executed, which surfaces as junk characters ahead of the first line.
+// Whether either is genuinely honoured is still unconfirmed. The five values
+// above are inert while this is off.
+#define DEFAULT_PRINTER_HEATING_COMMANDS false
+// 1500ms between lines: long enough for the rail to recover on a shared supply,
+// which is what alternating dark/light rows point at.
+#define DEFAULT_PRINTER_LINE_DELAY_MS 1500
 #define DEFAULT_SELF_TIMER_ENABLED true
 #define DEFAULT_FLASH_ENABLED true
 #define DEFAULT_AUTO_PRINT_ENABLED false

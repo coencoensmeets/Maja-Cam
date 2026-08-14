@@ -50,8 +50,8 @@ static esp_err_t camera_init_impl(Camera_t *self)
 
     ESP_LOGI(TAG, "Camera sensor detected! PID: 0x%02X", s->id.PID);
 
-    // Add initial delay for sensor to stabilize
-    vTaskDelay(pdMS_TO_TICKS(500));
+    // Let the sensor settle before pushing the register writes below
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     // Configure sensor settings with double-set for critical parameters
     s->set_brightness(s, 0);
@@ -75,17 +75,18 @@ static esp_err_t camera_init_impl(Camera_t *self)
 
     self->initialized = true;
     ESP_LOGI(TAG, "Camera initialized successfully");
-    self->status_led->blink(self->status_led, 3);
 
-    // Clear all frame buffers immediately after initialization
+    // Drop the frames captured with the pre-config sensor registers. Each
+    // fb_get already blocks for a full frame, so no extra delay is needed and
+    // 2 is enough to cycle both configured frame buffers.
     ESP_LOGI(TAG, "Flushing initial frame buffers...");
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 2; i++) {
         camera_fb_t *flush_fb = esp_camera_fb_get();
         if (flush_fb) {
             esp_camera_fb_return(flush_fb);
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
     }
+
     ESP_LOGI(TAG, "Frame buffers flushed");
 
     return ESP_OK;
