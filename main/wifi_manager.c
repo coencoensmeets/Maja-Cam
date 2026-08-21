@@ -11,6 +11,99 @@
 
 static const char *TAG = "WIFI";
 
+// Boot-time scan dump. On reason 201 (NO_AP_FOUND) the driver discards the AP
+// before ever trying the password, so band/channel/authmode all look identical
+// from the log. Listing what the radio can actually hear separates them. Costs
+// ~2s per boot — set to 0 once the network in use is known good.
+#define WIFI_SCAN_DIAGNOSTICS 1
+
+#if WIFI_SCAN_DIAGNOSTICS
+static const char *wifi_authmode_str(wifi_auth_mode_t mode)
+{
+    switch (mode)
+    {
+    case WIFI_AUTH_OPEN:          return "OPEN";
+    case WIFI_AUTH_WEP:           return "WEP";
+    case WIFI_AUTH_WPA_PSK:       return "WPA_PSK";
+    case WIFI_AUTH_WPA2_PSK:      return "WPA2_PSK";
+    case WIFI_AUTH_WPA_WPA2_PSK:  return "WPA_WPA2_PSK";
+    case WIFI_AUTH_WPA3_PSK:      return "WPA3_PSK";
+    case WIFI_AUTH_WPA2_WPA3_PSK: return "WPA2_WPA3_PSK";
+    default:                      return "OTHER";
+    }
+}
+
+// Blocking all-channel scan; logs every 2.4GHz AP in range and flags the one
+// we are trying to join. Must run before esp_wifi_connect(), since a scan and
+// an association attempt cannot share the radio.
+static void wifi_scan_dump(const char *target_ssid)
+{
+    wifi_scan_config_t scan_cfg = {
+        .ssid = NULL,
+        .bssid = NULL,
+        .channel = 0, // 0 = sweep every channel the country code permits
+        .show_hidden = true,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+    };
+
+    ESP_LOGI(TAG, "Scanning... (this radio is 2.4GHz only, 5GHz APs can never appear here)");
+    esp_err_t err = esp_wifi_scan_start(&scan_cfg, true);
+    if (err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Scan failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    uint16_t count = 0;
+    esp_wifi_scan_get_ap_num(&count);
+    if (count == 0)
+    {
+        ESP_LOGE(TAG, "Scan found ZERO APs - antenna, RF shielding or driver problem, not a credentials problem");
+        return;
+    }
+
+    const uint16_t max_records = 20;
+    if (count > max_records)
+    {
+        count = max_records;
+    }
+
+    wifi_ap_record_t *records = calloc(count, sizeof(wifi_ap_record_t));
+    if (records == NULL)
+    {
+        ESP_LOGE(TAG, "Out of memory for scan results");
+        esp_wifi_clear_ap_list();
+        return;
+    }
+    esp_wifi_scan_get_ap_records(&count, records);
+
+    bool target_found = false;
+    ESP_LOGI(TAG, "--- Visible APs (%u) ---", count);
+    for (uint16_t i = 0; i < count; i++)
+    {
+        const char *ssid = (const char *)records[i].ssid;
+        bool is_target = (strcmp(ssid, target_ssid) == 0);
+        target_found |= is_target;
+
+        ESP_LOGI(TAG, "%s %-32s ch=%2d rssi=%4d auth=%s",
+                 is_target ? "=>" : "  ",
+                 (ssid[0] == '\0') ? "<hidden>" : ssid,
+                 records[i].primary,
+                 records[i].rssi,
+                 wifi_authmode_str(records[i].authmode));
+    }
+    ESP_LOGI(TAG, "--- End of scan ---");
+
+    if (!target_found)
+    {
+        ESP_LOGE(TAG, "'%s' is NOT in range. The password is irrelevant until this line goes away.", target_ssid);
+        ESP_LOGE(TAG, "Check: hotspot still on (Android auto-disables it when idle)? 2.4GHz band? SSID hidden?");
+    }
+
+    free(records);
+}
+#endif // WIFI_SCAN_DIAGNOSTICS
+
 // WiFi event handler implementation
 static void wifi_event_handler_impl(void *arg, esp_event_base_t event_base,
                                     int32_t event_id, void *event_data)
@@ -19,8 +112,9 @@ static void wifi_event_handler_impl(void *arg, esp_event_base_t event_base,
 
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
     {
-        ESP_LOGI(TAG, "WiFi started, connecting...");
-        esp_wifi_connect();
+        // The first connect is driven from wifi_init_impl instead, so the
+        // diagnostic scan gets the radio to itself. Retries stay event-driven.
+        ESP_LOGI(TAG, "WiFi started");
     }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
     {
@@ -53,6 +147,13 @@ static esp_err_t wifi_init_impl(WiFi_t *self)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
+    // IDF defaults to country "01", which caps scanning at channel 11. A phone
+    // hotspot in EU regulatory domain can legally land on 12 or 13, and such an
+    // AP is then invisible to both the scan and the connect attempt. With
+    // ieee80211d enabled the station adopts the AP's advertised country anyway,
+    // so this only widens what we are able to discover in the first place.
+    ESP_ERROR_CHECK(esp_wifi_set_country_code("NL", true));
+
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                                wifi_event_handler_impl, self));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
@@ -80,7 +181,12 @@ static esp_err_t wifi_init_impl(WiFi_t *self)
 
     ESP_ERROR_CHECK(esp_wifi_start());
 
+#if WIFI_SCAN_DIAGNOSTICS
+    wifi_scan_dump(self->ssid);
+#endif
+
     ESP_LOGI(TAG, "WiFi connecting to %s...", self->ssid);
+    ESP_ERROR_CHECK(esp_wifi_connect());
     return ESP_OK;
 }
 
